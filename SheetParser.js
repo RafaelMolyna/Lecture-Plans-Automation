@@ -14,7 +14,10 @@ function findDraftInClassSheet(
 ) {
   const sheet = ss.getSheetByName(tabName);
   if (!sheet) {
-    if (log) log.warn(`Aba "${tabName}" não encontrada.`);
+    if (log)
+      log.warn("Draft_Parser", `Aba "${tabName}" não encontrada na planilha`, {
+        targetSubject,
+      });
     return null;
   }
 
@@ -55,9 +58,29 @@ function findDraftInClassSheet(
     }
   }
 
-  if (headerRowIdx === -1) return null;
+  if (headerRowIdx === -1) {
+    if (log)
+      log.warn(
+        "Draft_Parser",
+        'Cabeçalho "Conteúdos dados:" não encontrado na aba',
+        { tabName, targetSubject },
+      );
+    return null;
+  }
+
+  if (log) {
+    log.info("Draft_Parser", `Tabela mapeada em ${tabName}`, {
+      headerRow: headerRowIdx + 1,
+      hasAulasCol: colMap.aulas !== -1,
+      hasDataCol: colMap.data !== -1,
+      hasDisciplinaCol: colMap.disciplina !== -1,
+      hasBimestreCol: colMap.bimestre !== -1,
+    });
+  }
 
   const subjectRows = [];
+  let ignoredOtherSubjectCount = 0;
+
   for (let r = headerRowIdx + 1; r < displayData.length; r++) {
     const col0 = String(displayData[r][0] || "").trim();
     if (/^nomes?$/i.test(col0)) break;
@@ -87,7 +110,10 @@ function findDraftInClassSheet(
     }
 
     if (!rawSummary && !rawAulas) continue;
-    if (rowSubject.toLowerCase() !== targetSubject.toLowerCase()) continue;
+    if (rowSubject.toLowerCase() !== targetSubject.toLowerCase()) {
+      ignoredOtherSubjectCount++;
+      continue;
+    }
 
     const richLinks = extractRichTextUrls(richTextData[r][colMap.conteudo]);
     const parsedRowDate = parseFlexibleDate(rawDateVal, rawDateDisplay);
@@ -108,12 +134,35 @@ function findDraftInClassSheet(
     });
   }
 
-  if (subjectRows.length === 0) return null;
+  if (subjectRows.length === 0) {
+    if (log) {
+      log.warn(
+        "Draft_Parser",
+        `Nenhuma linha de rascunho encontrada para ${tabName} (${targetSubject})`,
+        {
+          ignoredOtherSubjectCount,
+        },
+      );
+    }
+    return null;
+  }
 
   // Prioridade 1: Data exata
   for (let i = 0; i < subjectRows.length; i++) {
     const sr = subjectRows[i];
     if (sr.dateObj && isSameDayMonth(sr.dateObj, targetDateObj)) {
+      if (log) {
+        log.info(
+          "Draft_Parser",
+          `Rascunho selecionado por DATA EXATA em ${tabName} (${targetSubject})`,
+          {
+            row: sr.rowNumber,
+            date: formatPtShortDate(targetDateObj),
+            aulas: sr.aulas || "(vazio)",
+            bimestreCol: sr.bimestre || "(não informado)",
+          },
+        );
+      }
       return {
         summary: sr.summary,
         aulas: sr.aulas,
@@ -144,6 +193,19 @@ function findDraftInClassSheet(
       candidate.isDateBlank &&
       (candidate.summary !== "" || candidate.aulas !== "")
     ) {
+      if (log) {
+        log.info(
+          "Draft_Parser",
+          `Rascunho selecionado como PRÓXIMA LINHA SEM DATA em ${tabName} (${targetSubject})`,
+          {
+            row: candidate.rowNumber,
+            afterRowIndex: lastPastOrCurrentDatedIndex,
+            assignedDate: formatPtShortDate(targetDateObj),
+            aulas: candidate.aulas || "(vazio)",
+            bimestreCol: candidate.bimestre || "(não informado)",
+          },
+        );
+      }
       return {
         summary: candidate.summary,
         aulas: candidate.aulas,
@@ -155,6 +217,17 @@ function findDraftInClassSheet(
         dateColIndex: candidate.dateColIndex,
       };
     }
+  }
+
+  if (log) {
+    log.warn(
+      "Draft_Parser",
+      `Sem rascunho compatível para ${tabName} (${targetSubject}) na data ${formatPtShortDate(targetDateObj)}`,
+      {
+        candidateRows: subjectRows.length,
+        lastPastOrCurrentDatedIndex,
+      },
+    );
   }
 
   return null;
@@ -225,10 +298,17 @@ function parsePaCellInfo(cellText) {
   };
 }
 
-function loadEducEspData(ss) {
+function loadEducEspData(ss, log) {
   const map = {};
   const sheet = ss.getSheetByName("Educ. Esp.");
-  if (!sheet) return map;
+  if (!sheet) {
+    if (log)
+      log.warn(
+        "Educ_Esp_Load",
+        'Aba "Educ. Esp." não encontrada; acessibilidade será N/A para turmas padrão.',
+      );
+    return map;
+  }
 
   const rows = sheet.getDataRange().getDisplayValues();
   const allStudents = [];
@@ -260,6 +340,13 @@ function loadEducEspData(ss) {
         if (!map["Eletiva"]) map["Eletiva"] = [];
         map["Eletiva"].push(st);
       }
+    });
+  }
+
+  if (log) {
+    log.info("Educ_Esp_Load", "Perfis de Educação Especial carregados", {
+      totalStudents: allStudents.length,
+      roomsMapped: Object.keys(map),
     });
   }
 

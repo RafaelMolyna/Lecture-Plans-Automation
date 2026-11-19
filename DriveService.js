@@ -18,6 +18,11 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
         url.includes("acervocmsp.educacao.sp.gov.br")
       ) {
         if (!pdfBase64Cache[url]) {
+          if (log)
+            log.info("PDF_Resolver", "Baixando PDF externo por URL", {
+              tab: block.tabName,
+              url,
+            });
           const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
           if (resp.getResponseCode() === 200) {
             const bytes = resp.getBlob().getBytes();
@@ -26,7 +31,17 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
               base64: Utilities.base64Encode(bytes),
               byteLength: bytes.length,
             };
+          } else if (log) {
+            log.warn(
+              "PDF_Resolver",
+              `Falha HTTP ${resp.getResponseCode()} ao baixar PDF externo`,
+              { url },
+            );
           }
+        } else if (log) {
+          log.info("PDF_Cache", "PDF externo reutilizado do cache", {
+            name: pdfBase64Cache[url].name,
+          });
         }
         if (pdfBase64Cache[url]) results.push(pdfBase64Cache[url]);
       } else if (url.includes("drive.google.com/file/d/")) {
@@ -40,7 +55,19 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
               base64: Utilities.base64Encode(bytes),
               byteLength: bytes.length,
             };
+            if (log)
+              log.info(
+                "PDF_Cache",
+                "PDF do Drive (link direto) carregado e cacheado",
+                { name: file.getName(), kb: Math.round(bytes.length / 1024) },
+              );
           }
+        } else if (log) {
+          log.info(
+            "PDF_Cache",
+            "PDF do Drive (link direto) reutilizado do cache",
+            { name: pdfBase64Cache[fileId].name },
+          );
         }
         if (pdfBase64Cache[fileId]) results.push(pdfBase64Cache[fileId]);
       }
@@ -50,7 +77,14 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
     }
   });
 
-  if (results.length > 0) return results;
+  if (results.length > 0) {
+    if (log)
+      log.info(
+        "PDF_Resolver",
+        `Resolvidos ${results.length} PDF(s) via URL direta para ${block.tabName}`,
+      );
+    return results;
+  }
 
   const targetBimestre = detectTargetBimestre(
     block.draft.bimestre,
@@ -61,24 +95,75 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
     block.draft.aulas,
     block.draft.summary,
   );
-  if (parsedRequests.length === 0) return results;
+
+  if (log) {
+    log.info(
+      "PDF_Resolver",
+      `Parâmetros de busca para ${block.tabName} (${block.subject})`,
+      {
+        targetBimestre,
+        aulasCol: block.draft.aulas || "(vazio)",
+        parsedRequests,
+      },
+    );
+  }
+
+  if (parsedRequests.length === 0) {
+    if (log)
+      log.info(
+        "PDF_Resolver",
+        `Nenhum número de aula/PDF identificado para ${block.tabName}; prosseguindo sem PDF anexo.`,
+      );
+    return results;
+  }
 
   const props = PropertiesService.getScriptProperties();
   const rootAulasFolderId = props.getProperty("AULAS_FOLDER_ID");
-  if (!rootAulasFolderId) return results;
+  if (!rootAulasFolderId) {
+    if (log)
+      log.warn(
+        "PDF_Resolver",
+        "AULAS_FOLDER_ID não configurado; busca no Drive ignorada.",
+      );
+    return results;
+  }
 
   try {
     const subjectKey = `${block.subject}_${block.grade}`;
     const targetFolderName = CONFIG.SUBJECT_FOLDER_NAMES[subjectKey];
-    if (!targetFolderName) return results;
+    if (!targetFolderName) {
+      if (log)
+        log.warn(
+          "PDF_Resolver",
+          `Sem mapeamento de pasta para chave "${subjectKey}"`,
+        );
+      return results;
+    }
 
     const subjectFolder = findSubfolderByName(
       DriveApp.getFolderById(rootAulasFolderId),
       targetFolderName,
     );
-    if (!subjectFolder) return results;
+    if (!subjectFolder) {
+      if (log)
+        log.warn(
+          "PDF_Resolver",
+          `Subpasta "${targetFolderName}" não encontrada na pasta raiz de aulas.`,
+        );
+      return results;
+    }
 
     const candidatePdfs = collectPdfsForBimestre(subjectFolder, targetBimestre);
+    if (log) {
+      log.info(
+        "PDF_Resolver",
+        `Candidatos encontrados em "${targetFolderName}" (Bim ${targetBimestre})`,
+        {
+          candidateCount: candidatePdfs.length,
+        },
+      );
+    }
+
     const addedIds = {};
 
     parsedRequests.forEach((req) => {
@@ -99,24 +184,42 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
               base64: Utilities.base64Encode(bytes),
               byteLength: bytes.length,
             };
-            if (log)
+            if (log) {
               log.info(
-                `PDF carregado e cacheado: ${match.getName()} (${(bytes.length / 1024).toFixed(0)} KB)`,
+                "PDF_Cache",
+                `PDF lido do Drive e cacheado: ${match.getName()}`,
+                {
+                  reqNum: req.num,
+                  isDirectPdf: req.isDirectPdf,
+                  kb: Math.round(bytes.length / 1024),
+                },
               );
-          } else {
-            if (log) log.info(`PDF reutilizado do cache: ${match.getName()}`);
+            }
+          } else if (log) {
+            log.info(
+              "PDF_Cache",
+              `PDF reutilizado do cache em memória: ${match.getName()}`,
+              {
+                reqNum: req.num,
+              },
+            );
           }
           results.push(pdfBase64Cache[fileId]);
         }
-      } else {
-        if (log)
-          log.warn(
-            `PDF não encontrado para ${block.tabName} (${block.subject}) - Bim ${targetBimestre}, Aula/PDF ${req.num}`,
-          );
+      } else if (log) {
+        log.warn(
+          "PDF_Resolver",
+          `PDF não encontrado para ${block.tabName} (${block.subject})`,
+          {
+            bimestre: targetBimestre,
+            reqNum: req.num,
+            isDirectPdf: req.isDirectPdf,
+          },
+        );
       }
     });
   } catch (e) {
-    if (log) log.error("Erro ao buscar PDFs no Drive", e.message);
+    if (log) log.error("PDF_Resolver", "Erro ao buscar PDFs no Drive", e);
   }
 
   return results;
@@ -251,88 +354,119 @@ function collectPdfsForBimestre(subjectFolder, targetBimestre) {
 }
 
 function standardizeDrivePdfNames() {
+  const log = new ExecutionLogger("Padronizar Nomes de PDFs no Drive");
   const ui = SpreadsheetApp.getUi();
   const props = PropertiesService.getScriptProperties();
   const rootId = props.getProperty("AULAS_FOLDER_ID");
 
-  if (!rootId) {
-    ui.alert('⚠️ Configure a pasta "Aulas" primeiro no menu 6.');
-    return;
-  }
+  try {
+    if (!rootId) {
+      log.warn("PDF_Rename", "AULAS_FOLDER_ID não configurado.");
+      ui.alert(
+        '⚠️ Configure a pasta "Aulas" primeiro em "🤖 Planos PEI > ⚙️ Ferramentas e Configs > 🔑 Configurar Chave da API (Gemini) e Pastas".',
+      );
+      return;
+    }
 
-  const confirm = ui.alert(
-    "🗂️ Padronizar Nomes dos PDFs no Drive",
-    "Esta função irá organizar os nomes dos PDFs nas pastas de Física e Robótica para:\n\n" +
-      "• Física: [Física 1 - 4º Bim] Aula 04 - Título.pdf\n" +
-      "• Robótica: [Robótica 1 - 4º Bim] PDF 03 (Aulas 05 e 06) - Título.pdf\n\n" +
-      "Deseja continuar?",
-    ui.ButtonSet.YES_NO,
-  );
-  if (confirm !== ui.Button.YES) return;
+    const confirm = ui.alert(
+      "🗂️ Padronizar Nomes dos PDFs no Drive",
+      "Esta função irá organizar os nomes dos PDFs nas pastas de Física e Robótica para:\n\n" +
+        "• Física: [Física 1 - 4º Bim] Aula 04 - Título.pdf\n" +
+        "• Robótica: [Robótica 1 - 4º Bim] PDF 03 (Aulas 05 e 06) - Título.pdf\n\n" +
+        "Deseja continuar?",
+      ui.ButtonSet.YES_NO,
+    );
+    if (confirm !== ui.Button.YES) {
+      log.info("PDF_Rename", "Operação cancelada pelo usuário.");
+      return;
+    }
 
-  const rootFolder = DriveApp.getFolderById(rootId);
-  const subFolders = [
-    "Física 1",
-    "Física 2",
-    "Física 3",
-    "Robótica 1",
-    "Robótica 2",
-  ];
-  let renamedCount = 0;
+    log.timeStart("Rename_Drive_Pdfs");
+    const rootFolder = DriveApp.getFolderById(rootId);
+    const subFolders = [
+      "Física 1",
+      "Física 2",
+      "Física 3",
+      "Robótica 1",
+      "Robótica 2",
+    ];
+    let renamedCount = 0;
 
-  subFolders.forEach((folderName) => {
-    const folder = findSubfolderByName(rootFolder, folderName);
-    if (!folder) return;
-    const isRobotics = folderName.toLowerCase().includes("robótica");
-    const files = collectPdfsForBimestre(folder, null);
-
-    files.forEach((file) => {
-      const oldName = file.getName();
-      if (oldName.startsWith("[")) return;
-
-      const bimMatch = oldName.match(/(\d)[ºo°]?\s*Bim/i);
-      const bim = bimMatch
-        ? `${bimMatch[1]}º Bim`
-        : `${CONFIG.CURRENT_BIMESTRE}º Bim`;
-      const aulaMatch = oldName.match(/Aula\s*0?(\d{1,2})/i);
-      if (!aulaMatch) return;
-
-      const num = parseInt(aulaMatch[1], 10);
-      const padNum = num < 10 ? `0${num}` : `${num}`;
-
-      let cleanTopic = oldName
-        .replace(/\.pdf$/i, "")
-        .replace(/F[ií]sica\s*\d\s*[-,]?\s*/gi, "")
-        .replace(/Rob[oó]t\.?\s*[-,]?\s*/gi, "")
-        .replace(/\d[ºo°]?\s*Bim(?:estre)?\s*[-,]?\s*/gi, "")
-        .replace(/Aula\s*0?\d{1,2}\s*[-,]?\s*/gi, "")
-        .trim();
-
-      let newName = "";
-      if (isRobotics) {
-        const a1 = num * 2 - 1;
-        const a2 = num * 2;
-        const p1 = a1 < 10 ? `0${a1}` : `${a1}`;
-        const p2 = a2 < 10 ? `0${a2}` : `${a2}`;
-        newName = `[${folderName} - ${bim}] PDF ${padNum} (Aulas ${p1} e ${p2}) - ${cleanTopic}.pdf`;
-      } else {
-        newName = `[${folderName} - ${bim}] Aula ${padNum} - ${cleanTopic}.pdf`;
+    subFolders.forEach((folderName) => {
+      const folder = findSubfolderByName(rootFolder, folderName);
+      if (!folder) {
+        log.warn("PDF_Rename", `Subpasta não encontrada: ${folderName}`);
+        return;
       }
+      const isRobotics = folderName.toLowerCase().includes("robótica");
+      const files = collectPdfsForBimestre(folder, null);
 
-      file.setName(newName);
-      renamedCount++;
+      files.forEach((file) => {
+        const oldName = file.getName();
+        if (oldName.startsWith("[")) return;
+
+        const bimMatch = oldName.match(/(\d)[ºo°]?\s*Bim/i);
+        const bim = bimMatch
+          ? `${bimMatch[1]}º Bim`
+          : `${CONFIG.CURRENT_BIMESTRE}º Bim`;
+        const aulaMatch = oldName.match(/Aula\s*0?(\d{1,2})/i);
+        if (!aulaMatch) return;
+
+        const num = parseInt(aulaMatch[1], 10);
+        const padNum = num < 10 ? `0${num}` : `${num}`;
+
+        let cleanTopic = oldName
+          .replace(/\.pdf$/i, "")
+          .replace(/F[ií]sica\s*\d\s*[-,]?\s*/gi, "")
+          .replace(/Rob[oó]t\.?\s*[-,]?\s*/gi, "")
+          .replace(/\d[ºo°]?\s*Bim(?:estre)?\s*[-,]?\s*/gi, "")
+          .replace(/Aula\s*0?\d{1,2}\s*[-,]?\s*/gi, "")
+          .trim();
+
+        let newName = "";
+        if (isRobotics) {
+          const a1 = num * 2 - 1;
+          const a2 = num * 2;
+          const p1 = a1 < 10 ? `0${a1}` : `${a1}`;
+          const p2 = a2 < 10 ? `0${a2}` : `${a2}`;
+          newName = `[${folderName} - ${bim}] PDF ${padNum} (Aulas ${p1} e ${p2}) - ${cleanTopic}.pdf`;
+        } else {
+          newName = `[${folderName} - ${bim}] Aula ${padNum} - ${cleanTopic}.pdf`;
+        }
+
+        file.setName(newName);
+        renamedCount++;
+        log.info("PDF_Rename", `Renomeado: "${oldName}" -> "${newName}"`);
+      });
     });
-  });
 
-  ui.alert(`✅ ${renamedCount} arquivo(s) PDF foram padronizados com sucesso!`);
+    log.timeEnd("Rename_Drive_Pdfs", { renamedCount });
+    log.checkpoint("PDF_RENAME_DONE", { renamedCount });
+    ui.alert(
+      `✅ ${renamedCount} arquivo(s) PDF foram padronizados com sucesso!`,
+    );
+  } catch (err) {
+    log.error("PDF_Rename", "Erro ao padronizar nomes de PDFs", err);
+    throw err;
+  } finally {
+    log.flushToStorage();
+  }
 }
 
 function getPrioritizedCurriculumText(apiKey, log) {
   const props = PropertiesService.getScriptProperties();
   const guiaFolderId = props.getProperty("GUIA_FOLDER_ID");
-  if (!guiaFolderId) return "";
+  if (!guiaFolderId) {
+    if (log)
+      log.warn(
+        "Guia_Curricular",
+        "GUIA_FOLDER_ID não configurado; usando fallback BNCC.",
+      );
+    return "";
+  }
 
   try {
+    if (log) log.timeStart("Guia_Curricular_Lookup");
     const folder = DriveApp.getFolderById(guiaFolderId);
     const files = folder.getFiles();
     let targetFile = null;
@@ -346,20 +480,37 @@ function getPrioritizedCurriculumText(apiKey, log) {
       }
     }
 
-    if (!targetFile) return "";
+    if (!targetFile) {
+      if (log) {
+        log.timeEnd("Guia_Curricular_Lookup", { found: false });
+        log.warn(
+          "Guia_Curricular",
+          'Arquivo "Guia do Currículo Priorizado" não encontrado na pasta configurada.',
+        );
+      }
+      return "";
+    }
 
     const fileSignature = `${targetFile.getId()}_${targetFile.getLastUpdated().getTime()}`;
     const cachedSig = props.getProperty("GUIA_CACHE_SIG");
     const cachedText = props.getProperty("GUIA_CACHE_TEXT");
 
     if (cachedSig === fileSignature && cachedText) {
-      if (log) log.info("Guia do Currículo Priorizado carregado do cache.");
+      if (log) {
+        log.timeEnd("Guia_Curricular_Lookup", {
+          source: "CACHE",
+          fileName: targetFile.getName(),
+          chars: cachedText.length,
+        });
+      }
       return cachedText;
     }
 
     if (log)
       log.info(
+        "Guia_Curricular",
         "Extraindo habilidades do Guia do Currículo Priorizado via Gemini...",
+        { fileName: targetFile.getName() },
       );
     const blob = targetFile.getBlob();
     const prompt =
@@ -371,10 +522,28 @@ function getPrioritizedCurriculumText(apiKey, log) {
       const trimmed = extractedCatalog.substring(0, 8500);
       props.setProperty("GUIA_CACHE_SIG", fileSignature);
       props.setProperty("GUIA_CACHE_TEXT", trimmed);
+      if (log)
+        log.timeEnd("Guia_Curricular_Lookup", {
+          source: "GEMINI_EXTRACT",
+          chars: trimmed.length,
+        });
       return trimmed;
     }
+
+    if (log) {
+      log.timeEnd("Guia_Curricular_Lookup", { source: "EMPTY_RESULT" });
+      log.warn(
+        "Guia_Curricular",
+        "Extração do Guia retornou vazio ou curto demais.",
+      );
+    }
   } catch (e) {
-    if (log) log.warn("Aviso ao ler Guia do Currículo Priorizado", e.message);
+    if (log)
+      log.error(
+        "Guia_Curricular",
+        "Erro ao ler Guia do Currículo Priorizado",
+        e,
+      );
   }
   return "";
 }

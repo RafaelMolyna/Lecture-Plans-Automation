@@ -1,3 +1,118 @@
+/**
+ * ============================================================================
+ * 2. MAIN.JS - ORQUESTRADOR PARALELO, SELETOR DE SEMANA E LOGS (v3.1)
+ * ============================================================================
+ */
+
+function openWeekPickerDialog() {
+  const html = HtmlService.createHtmlOutputFromFile("WeekPicker")
+    .setWidth(420)
+    .setHeight(240);
+  SpreadsheetApp.getUi().showModalDialog(html, "📅 Preparar Nova Semana");
+}
+
+function applyPreparedWeek(isoDateStr) {
+  const log = new ExecutionLogger("Preparar Nova Semana", { isoDateStr });
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  try {
+    log.timeStart("Prepare_Week_Sheet");
+    const baseSheet = ss.getSheetByName("PA (Base)");
+    let atualSheet = ss.getSheetByName("PA (Atual)");
+
+    if (!baseSheet) {
+      log.error("Prepare_Week_Sheet", 'Aba "PA (Base)" não encontrada.');
+      throw new Error('Aba "PA (Base)" não encontrada.');
+    }
+
+    const parts = String(isoDateStr || "").split("-");
+    if (parts.length !== 3) {
+      log.error(
+        "Prepare_Week_Sheet",
+        "Formato de data inválido recebido do modal",
+        { isoDateStr },
+      );
+      throw new Error("Formato de data inválido.");
+    }
+
+    const monday = new Date(
+      parseInt(parts[0], 10),
+      parseInt(parts[1], 10) - 1,
+      parseInt(parts[2], 10),
+      12,
+      0,
+      0,
+    );
+
+    if (isNaN(monday.getTime())) {
+      log.error("Prepare_Week_Sheet", "Data inválida após parsing", {
+        isoDateStr,
+      });
+      throw new Error("Data inválida.");
+    }
+
+    if (!atualSheet) {
+      atualSheet = baseSheet.copyTo(ss).setName("PA (Atual)");
+      log.info(
+        "Prepare_Week_Sheet",
+        'Aba "PA (Atual)" criada a partir de "PA (Base)".',
+      );
+    } else {
+      atualSheet.clear();
+      baseSheet.getDataRange().copyTo(atualSheet.getRange(1, 1));
+      log.info(
+        "Prepare_Week_Sheet",
+        'Aba "PA (Atual)" resetada a partir de "PA (Base)".',
+      );
+    }
+
+    const dayNames = ["SEG", "TER", "QUA", "QUI", "SEX"];
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    const updatedHeaders = [];
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(monday.getTime() + i * oneDayMs);
+      const formatted = Utilities.formatDate(d, CONFIG.TIMEZONE, "dd/MM/yy");
+      const label = `${formatted}\n${dayNames[i]}`;
+      atualSheet.getRange(4, 2 + i).setValue(label);
+      updatedHeaders.push(label.replace("\n", " "));
+    }
+
+    ss.setActiveSheet(atualSheet);
+    log.timeEnd("Prepare_Week_Sheet", { headers: updatedHeaders });
+    log.checkpoint("WEEK_PREPARED", { monday: isoDateStr });
+    ss.toast(
+      `Semana de ${parts[2]}/${parts[1]}/${parts[0]} preparada em "PA (Atual)"!`,
+      "✅ Concluído",
+      5,
+    );
+  } catch (err) {
+    log.error("Prepare_Week_Sheet", "Falha ao preparar nova semana", err, {
+      isoDateStr,
+    });
+    throw err;
+  } finally {
+    log.flushToStorage();
+  }
+}
+
+function generateAllWeekPlans() {
+  runPlanGeneration(null);
+}
+
+function generatePlanForActiveTab() {
+  const activeTabName = SpreadsheetApp.getActiveSpreadsheet()
+    .getActiveSheet()
+    .getName();
+  if (!CONFIG.TAB_TO_FULLNAME[activeTabName]) {
+    SpreadsheetApp.getUi().alert(
+      `⚠️ Você está na aba "${activeTabName}".\n\n` +
+        `Entre primeiro na aba de uma turma (ex: "1º HO", "2º LE", "3º AL" ou "Eletiva").`,
+    );
+    return;
+  }
+  runPlanGeneration(activeTabName);
+}
+
 function runPlanGeneration(filterTabName) {
   const opLabel = filterTabName
     ? `Gerar Plano (${filterTabName})`
@@ -17,7 +132,7 @@ function runPlanGeneration(filterTabName) {
         "GEMINI_API_KEY não configurada em ScriptProperties.",
       );
       ui.alert(
-        '⚠️ Chave da API Gemini não configurada. Acesse "🤖 Planos PEI > 6. Configurar Chave da API".',
+        '⚠️ Chave da API Gemini não configurada. Acesse "🤖 Planos PEI > ⚙️ Ferramentas e Configs > 🔑 Configurar Chave da API".',
       );
       return;
     }
@@ -35,7 +150,10 @@ function runPlanGeneration(filterTabName) {
     const gridRange = paSheet.getRange(5, 2, 8, 5);
     const gridValues = gridRange.getDisplayValues();
 
+    let skippedFilledCount = 0;
+    let ignoredNonLessonCells = 0;
     const blocks = [];
+
     for (let col = 0; col < 5; col++) {
       const dayDate = colDates[col];
       if (!dayDate) {
@@ -52,10 +170,18 @@ function runPlanGeneration(filterTabName) {
         const cellText = gridValues[row][col];
         const slotInfo = parsePaCellInfo(cellText);
 
-        if (
-          !slotInfo ||
-          (filterTabName && slotInfo.tabName !== filterTabName)
-        ) {
+        if (!slotInfo) {
+          ignoredNonLessonCells++;
+          row++;
+          continue;
+        }
+
+        if (filterTabName && slotInfo.tabName !== filterTabName) {
+          log.info("Scan_PA_Atual", `Célula ignorada por filtro de aba ativa`, {
+            cell: `R${row + 5}C${col + 2}`,
+            slotTab: slotInfo.tabName,
+            filterTabName,
+          });
           row++;
           continue;
         }
@@ -79,7 +205,19 @@ function runPlanGeneration(filterTabName) {
           ? secondCellInfo.hasModalidade
           : true;
 
-        if (!firstAlreadyFilled || !secondAlreadyFilled) {
+        if (firstAlreadyFilled && secondAlreadyFilled) {
+          skippedFilledCount++;
+          log.info(
+            "Scan_PA_Atual",
+            `Bloco já preenchido (MODALIDADE ORGANIZATIVA existente), ignorado`,
+            {
+              tab: slotInfo.tabName,
+              subject: slotInfo.subject,
+              date: formatPtShortDate(dayDate),
+              isDouble,
+            },
+          );
+        } else {
           blocks.push({
             colIndex: col + 2,
             row1: row + 5,
@@ -106,8 +244,16 @@ function runPlanGeneration(filterTabName) {
         row += isDouble ? 2 : 1;
       }
     }
-    log.timeEnd("Scan_PA_Atual", { pendingBlocks: blocks.length });
-    log.checkpoint("PA_SCANNED", { pendingBlocks: blocks.length });
+
+    log.timeEnd("Scan_PA_Atual", {
+      pendingBlocks: blocks.length,
+      skippedFilledCount,
+      ignoredNonLessonCells,
+    });
+    log.checkpoint("PA_SCANNED", {
+      pendingBlocks: blocks.length,
+      skippedFilledCount,
+    });
 
     if (blocks.length === 0) {
       log.info("RUN_END", "Nenhum bloco pendente encontrado em PA (Atual).");
@@ -173,7 +319,7 @@ function runPlanGeneration(filterTabName) {
     }
 
     log.timeStart("Load_EducEsp_And_Guia");
-    const educEspMap = loadEducEspData(ss);
+    const educEspMap = loadEducEspData(ss, log);
     const guiaSummary = getPrioritizedCurriculumText(apiKey, log);
     log.timeEnd("Load_EducEsp_And_Guia");
 
@@ -193,6 +339,15 @@ function runPlanGeneration(filterTabName) {
 
     const preparedItems = readyBlocks.map((block) => {
       const studentsEsp = educEspMap[block.tabName] || [];
+      log.info(
+        "Educ_Esp_Eval",
+        `Acessibilidade avaliada para ${block.tabName} (${block.subject})`,
+        {
+          matchedStudents: studentsEsp.map((s) => s.name),
+          resultMode: studentsEsp.length > 0 ? "ADAPTED" : "N/A",
+        },
+      );
+
       const encodedPdfs = block.isEletiva
         ? []
         : resolveLecturePdfsCached(block, pdfBase64Cache, log);
@@ -246,15 +401,23 @@ function runPlanGeneration(filterTabName) {
               block,
               parsedPlan.aula_1,
               item.studentsEsp,
+              log,
             );
             paSheet.getRange(block.row1, block.colIndex).setValue(updatedCell1);
 
             if (block.isDouble && block.row2) {
               const part2Data = parsedPlan.aula_2 || parsedPlan.aula_1;
+              if (!parsedPlan.aula_2) {
+                log.warn(
+                  "Double_Split",
+                  `aula_2 ausente na resposta de ${block.tabName}; reutilizando aula_1.`,
+                );
+              }
               const updatedCell2 = buildFormattedCellText(
                 block,
                 part2Data,
                 item.studentsEsp,
+                log,
               );
               paSheet
                 .getRange(block.row2, block.colIndex)
@@ -330,7 +493,7 @@ function runPlanGeneration(filterTabName) {
         `⚠️ Concluído com ressalvas!\n\n` +
           `• Gerados com sucesso: ${successCount}\n` +
           `• Falhas: ${errorCount}\n\n` +
-          `Abra "🤖 Planos PEI > 4. Ver Logs da Última Execução" para ver o gargalo e o erro exato.`,
+          `Abra "🤖 Planos PEI > ⚙️ Ferramentas e Configs > 📋 Ver Logs da Última Execução" para ver o gargalo e o erro exato.`,
       );
     } else {
       ui.alert(
@@ -348,7 +511,7 @@ function runPlanGeneration(filterTabName) {
     );
     ui.alert(
       `❌ Erro crítico na etapa "${log.lastCheckpoint}": ${err.message}\n\n` +
-        `Abra "🤖 Planos PEI > 4. Ver Logs da Última Execução" para ver o stack trace e os tempos.`,
+        `Abra "🤖 Planos PEI > ⚙️ Ferramentas e Configs > 📋 Ver Logs da Última Execução" para ver o stack trace e os tempos.`,
     );
   } finally {
     log.flushToStorage();

@@ -5,8 +5,15 @@
  */
 
 function buildGeminiRequestPayload(params) {
-  const { apiKey, modelName, block, studentsEsp, encodedPdfs, guiaSummary } =
-    params;
+  const {
+    apiKey,
+    modelName,
+    block,
+    studentsEsp,
+    encodedPdfs,
+    guiaSummary,
+    log,
+  } = params;
 
   const draftLower = (
     block.draft.summary +
@@ -22,18 +29,34 @@ function buildGeminiRequestPayload(params) {
     draftLower.includes("simula");
 
   let mediaConstraintInstruction = "";
+  let mediaDecision = "";
   if (block.noTv) {
     if (mentionsVideoOrSim) {
+      mediaDecision = "NO_TV_WITH_PROJECTOR";
       mediaConstraintInstruction =
         `RESTRIÇÃO DE SALA (${block.tabName}): Esta sala NÃO possui Televisor. ` +
         `PROIBIDO incluir "Televisor" em RECURSOS. Como o rascunho menciona vídeo ou simulação, utilize "Projetor" em RECURSOS.`;
     } else {
+      mediaDecision = "NO_TV_PRINTED_ONLY";
       mediaConstraintInstruction =
         `RESTRIÇÃO DE SALA (${block.tabName}): Esta sala NÃO possui Televisor. ` +
         `PROIBIDO incluir "Televisor" ou "Projetor" em RECURSOS. Priorize "Material Impresso / Lista de Exercícios" e "Quadro Branco".`;
     }
   } else {
+    mediaDecision = "TV_ALLOWED";
     mediaConstraintInstruction = `SALA COM TELEVISOR (${block.tabName}): Você pode incluir "Televisor" em RECURSOS caso a aula utilize slides, vídeos ou simulações.`;
+  }
+
+  if (log) {
+    log.info(
+      "Media_Policy",
+      `Política de mídia aplicada para ${block.tabName} (${block.subject})`,
+      {
+        noTv: block.noTv,
+        mentionsVideoOrSim,
+        mediaDecision,
+      },
+    );
   }
 
   let accessibilityInstruction = "";
@@ -123,10 +146,13 @@ Retorne APENAS um objeto JSON válido em Português (pt-BR) com a estrutura exat
   ];
 
   let totalBytes = 0;
+  let attachedCount = 0;
   const maxPayloadBytes = 22 * 1024 * 1024;
+
   encodedPdfs.forEach((pdfObj, idx) => {
     if (totalBytes + pdfObj.byteLength < maxPayloadBytes) {
       totalBytes += pdfObj.byteLength;
+      attachedCount++;
       userParts.push({
         text: `Arquivo PDF anexado #${idx + 1}: ${pdfObj.name}`,
       });
@@ -136,8 +162,34 @@ Retorne APENAS um objeto JSON válido em Português (pt-BR) com a estrutura exat
           data: pdfObj.base64,
         },
       });
+    } else if (log) {
+      log.warn(
+        "Payload_Cap",
+        `PDF ignorado por exceder limite acumulado de 22MB`,
+        {
+          tab: block.tabName,
+          subject: block.subject,
+          pdfName: pdfObj.name,
+          pdfKB: Math.round(pdfObj.byteLength / 1024),
+          currentTotalMB: (totalBytes / (1024 * 1024)).toFixed(2),
+        },
+      );
     }
   });
+
+  if (log) {
+    log.info(
+      "Payload_Built",
+      `Payload montado para ${block.tabName} (${block.subject})`,
+      {
+        date: block.shortDateStr,
+        isEletiva: block.isEletiva,
+        attachedPdfs: attachedCount,
+        requestedPdfs: encodedPdfs.length,
+        pdfBytesKB: Math.round(totalBytes / 1024),
+      },
+    );
+  }
 
   const activeModel = modelName || CONFIG.DEFAULT_MODEL;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${apiKey}`;
@@ -162,26 +214,58 @@ Retorne APENAS um objeto JSON válido em Português (pt-BR) com a estrutura exat
 function parseGeminiJsonResponse(responseText, block, log) {
   try {
     const json = JSON.parse(responseText);
-    if (
+    const candidateText =
       json.candidates &&
       json.candidates[0] &&
       json.candidates[0].content &&
-      json.candidates[0].content.parts[0].text
-    ) {
-      return JSON.parse(json.candidates[0].content.parts[0].text);
+      json.candidates[0].content.parts &&
+      json.candidates[0].content.parts[0]
+        ? json.candidates[0].content.parts[0].text
+        : null;
+
+    if (!candidateText) {
+      const finishReason =
+        json.candidates && json.candidates[0]
+          ? json.candidates[0].finishReason
+          : "UNKNOWN";
+      if (log) {
+        log.error(
+          "Gemini_Response",
+          `Sem conteúdo de texto na resposta de ${block.tabName} (${block.subject})`,
+          {
+            finishReason,
+            promptFeedback: json.promptFeedback,
+            rawPreview: responseText.slice(0, 350),
+          },
+        );
+      }
+      return null;
     }
-    if (log)
-      log.error(
-        `Resposta inválida da Gemini API para ${block.tabName}`,
-        responseText.slice(0, 400),
+
+    const parsed = JSON.parse(candidateText);
+    if (log) {
+      log.info(
+        "Gemini_Response",
+        `JSON válido recebido para ${block.tabName} (${block.subject})`,
+        {
+          hasAula1: Boolean(parsed.aula_1),
+          hasAula2: Boolean(parsed.aula_2),
+          temaAula1: parsed.aula_1 ? parsed.aula_1.tema_da_aula : undefined,
+        },
       );
-    return null;
+    }
+    return parsed;
   } catch (e) {
-    if (log)
+    if (log) {
       log.error(
-        `Erro ao fazer parse do JSON da Gemini API para ${block.tabName}`,
-        e.message,
+        "Gemini_Parse",
+        `Falha ao interpretar JSON retornado pelo Gemini em ${block.tabName}`,
+        e,
+        {
+          rawPreview: responseText.slice(0, 350),
+        },
       );
+    }
     return null;
   }
 }
@@ -218,10 +302,17 @@ function callGeminiTextOnlyWithPdf(apiKey, promptText, pdfBlob) {
     : "";
 }
 
-function buildFormattedCellText(block, planPart, studentsEsp) {
+function buildFormattedCellText(block, planPart, studentsEsp, log) {
   let recursos = planPart.recursos || "";
   if (block.noTv) {
+    const hadTv = /televisor/i.test(recursos);
     recursos = recursos.replace(/televisor(es)?\s*(,|e)?\s*/gi, "").trim();
+    if (hadTv && log) {
+      log.info(
+        "NoTv_Guard",
+        `Removido "Televisor" de RECURSOS por restrição da sala ${block.tabName}`,
+      );
+    }
   }
 
   const acessibilidade =

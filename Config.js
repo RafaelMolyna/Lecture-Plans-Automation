@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * 1. CONFIG.JS - CONSTANTES GLOBAIS, MENU E CONFIGURAÇÕES (v3.0)
+ * 1. CONFIG.JS - CONSTANTES GLOBAIS, MENU E CONFIGURAÇÕES (v3.1)
  * ============================================================================
  */
 
@@ -89,8 +89,22 @@ const CONFIG = {
 };
 
 function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu("🤖 Planos PEI")
+  const ui = SpreadsheetApp.getUi();
+
+  const toolsSubMenu = ui
+    .createMenu("⚙️ Ferramentas e Configs")
+    .addItem("📋 Ver Logs da Última Execução", "showLastExecutionLogs")
+    .addItem(
+      "🗂️ Padronizar Nomes dos PDFs no Drive",
+      "standardizeDrivePdfNames",
+    )
+    .addItem("🧠 Alternar Modelo IA (Flash ⚡ / Pro 🧠)", "toggleAiModel")
+    .addItem(
+      "🔑 Configurar Chave da API (Gemini) e Pastas",
+      "setupCredentialsDialog",
+    );
+
+  ui.createMenu("🤖 Planos PEI")
     .addItem(
       "📅 1. Preparar Nova Semana (PA Base ➔ PA Atual)",
       "openWeekPickerDialog",
@@ -104,16 +118,7 @@ function onOpen() {
       "generatePlanForActiveTab",
     )
     .addSeparator()
-    .addItem("📋 4. Ver Logs da Última Execução", "showLastExecutionLogs")
-    .addItem(
-      "🗂️ 5. Padronizar Nomes dos PDFs no Drive",
-      "standardizeDrivePdfNames",
-    )
-    .addItem(
-      "🔑 6. Configurar Chave da API (Gemini) e Pastas",
-      "setupCredentialsDialog",
-    )
-    .addItem("🧠 7. Alternar Modelo IA (Flash ⚡ / Pro 🧠)", "toggleAiModel")
+    .addSubMenu(toolsSubMenu)
     .addToUi();
 }
 
