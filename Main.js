@@ -397,7 +397,7 @@ function runPlanGeneration(filterTabName) {
         if (statusCode === 200) {
           const parsedPlan = parseGeminiJsonResponse(respText, block, log);
           if (parsedPlan && parsedPlan.aula_1) {
-            const updatedCell1 = buildFormattedCellText(
+            const updatedCell1 = buildFormattedCellRichText(
               block,
               parsedPlan.aula_1,
               item.studentsEsp,
@@ -415,7 +415,7 @@ function runPlanGeneration(filterTabName) {
                   `aula_2 ausente na resposta de ${block.tabName}; reutilizando aula_1.`,
                 );
               }
-              const updatedCell2 = buildFormattedCellText(
+              const updatedCell2 = buildFormattedCellRichText(
                 block,
                 part2Data,
                 item.studentsEsp,
