@@ -1,0 +1,175 @@
+<!doctype html>
+<html>
+  <head>
+    <base target="_top" />
+    <style>
+      body {
+        font-family: "Google Sans", Roboto, Arial, sans-serif;
+        padding: 16px;
+        color: #202124;
+        margin: 0;
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 6px;
+        font-size: 13px;
+      }
+      select,
+      input[type="date"] {
+        width: 100%;
+        padding: 10px;
+        font-size: 14px;
+        border: 1px solid #dadce0;
+        border-radius: 6px;
+        box-sizing: border-box;
+        margin-bottom: 14px;
+        background: #fff;
+      }
+      #customContainer {
+        display: none;
+        margin-top: 4px;
+      }
+      .actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      button {
+        padding: 9px 16px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        border: none;
+      }
+      .btn-cancel {
+        background: #f1f3f4;
+        color: #3c4043;
+      }
+      .btn-primary {
+        background: #1a73e8;
+        color: #fff;
+      }
+      .btn-primary:disabled {
+        background: #9aa0a6;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <label for="weekSelect">Selecione a semana (Segunda-feira):</label>
+    <select id="weekSelect" onchange="toggleCustomDate()">
+      <!-- Preenchido via JS -->
+    </select>
+
+    <div id="customContainer">
+      <label for="customDate"
+        >Escolha ou digite a Segunda-feira desejada:</label
+      >
+      <input type="date" id="customDate" />
+    </div>
+
+    <div class="actions">
+      <button class="btn-cancel" onclick="google.script.host.close()">
+        Cancelar
+      </button>
+      <button class="btn-primary" id="submitBtn" onclick="submitWeek()">
+        Preparar Semana
+      </button>
+    </div>
+
+    <script>
+      function formatBr(date) {
+        const d = String(date.getDate()).padStart(2, "0");
+        const m = String(date.getMonth() + 1).padStart(2, "0");
+        const y = date.getFullYear();
+        return `${d}/${m}/${y}`;
+      }
+
+      function formatIso(date) {
+        const d = String(date.getDate()).padStart(2, "0");
+        const m = String(date.getMonth() + 1).padStart(2, "0");
+        return `${date.getFullYear()}-${m}-${d}`;
+      }
+
+      function initDropdown() {
+        const select = document.getElementById("weekSelect");
+        const today = new Date();
+        const dayOfWeek = today.getDay(); // 0=Dom, 1=Seg...
+        const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+        const currentMonday = new Date(
+          today.getFullYear(),
+          today.getMonth(),
+          today.getDate() + diffToMonday,
+        );
+
+        const labels = [
+          "Semana Atual",
+          "Próxima Semana (+1)",
+          "Daqui a 2 Semanas (+2)",
+          "Daqui a 3 Semanas (+3)",
+          "Daqui a 4 Semanas (+4)",
+        ];
+
+        for (let i = 0; i < labels.length; i++) {
+          const mon = new Date(
+            currentMonday.getFullYear(),
+            currentMonday.getMonth(),
+            currentMonday.getDate() + i * 7,
+          );
+          const fri = new Date(
+            mon.getFullYear(),
+            mon.getMonth(),
+            mon.getDate() + 4,
+          );
+          const opt = document.createElement("option");
+          opt.value = formatIso(mon);
+          opt.textContent = `${labels[i]}: ${formatBr(mon)} a ${formatBr(fri)}`;
+          if (i === 1) opt.selected = true; // Seleciona "Próxima Semana" por padrão
+          select.appendChild(opt);
+        }
+
+        const customOpt = document.createElement("option");
+        customOpt.value = "CUSTOM";
+        customOpt.textContent = "✏️ Digitar / Escolher outra data...";
+        select.appendChild(customOpt);
+      }
+
+      function toggleCustomDate() {
+        const val = document.getElementById("weekSelect").value;
+        document.getElementById("customContainer").style.display =
+          val === "CUSTOM" ? "block" : "none";
+      }
+
+      function submitWeek() {
+        const selectVal = document.getElementById("weekSelect").value;
+        const isoDate =
+          selectVal === "CUSTOM"
+            ? document.getElementById("customDate").value
+            : selectVal;
+
+        if (!isoDate) {
+          alert("Por favor, selecione uma data válida.");
+          return;
+        }
+
+        const btn = document.getElementById("submitBtn");
+        btn.disabled = true;
+        btn.textContent = "Preparando...";
+
+        google.script.run
+          .withSuccessHandler(() => google.script.host.close())
+          .withFailureHandler((err) => {
+            alert("Erro: " + err.message);
+            btn.disabled = false;
+            btn.textContent = "Preparar Semana";
+          })
+          .applyPreparedWeek(isoDate);
+      }
+
+      initDropdown();
+    </script>
+  </body>
+</html>

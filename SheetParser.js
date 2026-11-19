@@ -1,30 +1,55 @@
 /**
  * ============================================================================
- * 3. SHEETPARSER.GS - LEITURA DE ABAS, DATAS E EDUCAÇÃO ESPECIAL
+ * 3. SHEETPARSER.GS - LEITURA DE ABAS, BIMESTRE, DATAS E EDUCAÇÃO ESPECIAL
  * ============================================================================
  */
 
-function findDraftInClassSheet(ss, tabName, targetSubject, targetDateObj, isEletiva) {
+function findDraftInClassSheet(
+  ss,
+  tabName,
+  targetSubject,
+  targetDateObj,
+  isEletiva,
+  log,
+) {
   const sheet = ss.getSheetByName(tabName);
-  if (!sheet) return null;
+  if (!sheet) {
+    if (log) log.warn(`Aba "${tabName}" não encontrada.`);
+    return null;
+  }
 
   const data = sheet.getDataRange().getValues();
   const displayData = sheet.getDataRange().getDisplayValues();
   const richTextData = sheet.getDataRange().getRichTextValues();
 
   let headerRowIdx = -1;
-  let colMap = { conteudo: 0, aulas: -1, data: -1, disciplina: -1 };
+  let colMap = {
+    conteudo: 0,
+    aulas: -1,
+    data: -1,
+    disciplina: -1,
+    bimestre: -1,
+  };
 
   for (let r = 0; r < displayData.length; r++) {
-    const firstCell = String(displayData[r][0] || '').trim().toLowerCase();
-    if (firstCell.startsWith('conteúdos dados') || firstCell.startsWith('conteudos dados')) {
+    const firstCell = String(displayData[r][0] || "")
+      .trim()
+      .toLowerCase();
+    if (
+      firstCell.startsWith("conteúdos dados") ||
+      firstCell.startsWith("conteudos dados")
+    ) {
       headerRowIdx = r;
       for (let c = 0; c < displayData[r].length; c++) {
-        const h = String(displayData[r][c] || '').trim().toLowerCase();
-        if (h.includes('conteúdo') || h.includes('conteudo')) colMap.conteudo = c;
-        else if (h.includes('aula')) colMap.aulas = c;
-        else if (h.includes('data')) colMap.data = c;
-        else if (h.includes('disciplina')) colMap.disciplina = c;
+        const h = String(displayData[r][c] || "")
+          .trim()
+          .toLowerCase();
+        if (h.includes("conteúdo") || h.includes("conteudo"))
+          colMap.conteudo = c;
+        else if (h.includes("aula")) colMap.aulas = c;
+        else if (h.includes("data")) colMap.data = c;
+        else if (h.includes("disciplina")) colMap.disciplina = c;
+        else if (h.includes("bim")) colMap.bimestre = c;
       }
       break;
     }
@@ -34,21 +59,31 @@ function findDraftInClassSheet(ss, tabName, targetSubject, targetDateObj, isElet
 
   const subjectRows = [];
   for (let r = headerRowIdx + 1; r < displayData.length; r++) {
-    const col0 = String(displayData[r][0] || '').trim();
+    const col0 = String(displayData[r][0] || "").trim();
     if (/^nomes?$/i.test(col0)) break;
 
-    const rawSummary = String(displayData[r][colMap.conteudo] || '').trim();
-    const rawAulas = colMap.aulas !== -1 ? String(displayData[r][colMap.aulas] || '').trim() : '';
-    const rawDateDisplay = colMap.data !== -1 ? String(displayData[r][colMap.data] || '').trim() : '';
-    const rawDateVal = colMap.data !== -1 ? data[r][colMap.data] : '';
+    const rawSummary = String(displayData[r][colMap.conteudo] || "").trim();
+    const rawAulas =
+      colMap.aulas !== -1
+        ? String(displayData[r][colMap.aulas] || "").trim()
+        : "";
+    const rawDateDisplay =
+      colMap.data !== -1
+        ? String(displayData[r][colMap.data] || "").trim()
+        : "";
+    const rawDateVal = colMap.data !== -1 ? data[r][colMap.data] : "";
+    const rawBimestre =
+      colMap.bimestre !== -1
+        ? String(displayData[r][colMap.bimestre] || "").trim()
+        : "";
 
-    let rowSubject = isEletiva ? 'Eletiva' : 'Física';
+    let rowSubject = isEletiva ? "Eletiva" : "Física";
     if (!isEletiva && colMap.disciplina !== -1) {
-      const dStr = String(displayData[r][colMap.disciplina] || '').trim();
-      if (/rob[oó]tica/i.test(dStr)) rowSubject = 'Robótica';
-      else if (/f[ií]sica/i.test(dStr)) rowSubject = 'Física';
-      else if (/eletiva/i.test(dStr)) rowSubject = 'Eletiva';
-      else if (dStr === '') rowSubject = 'Física';
+      const dStr = String(displayData[r][colMap.disciplina] || "").trim();
+      if (/rob[oó]tica/i.test(dStr)) rowSubject = "Robótica";
+      else if (/f[ií]sica/i.test(dStr)) rowSubject = "Física";
+      else if (/eletiva/i.test(dStr)) rowSubject = "Eletiva";
+      else if (dStr === "") rowSubject = "Física";
     }
 
     if (!rawSummary && !rawAulas) continue;
@@ -61,52 +96,63 @@ function findDraftInClassSheet(ss, tabName, targetSubject, targetDateObj, isElet
       rowNumber: r + 1,
       summary: rawSummary,
       aulas: rawAulas,
+      bimestre: rawBimestre,
       richLinks: richLinks,
       dateObj: parsedRowDate,
       rawDateDisplay: rawDateDisplay,
-      isDateBlank: !parsedRowDate && (rawDateDisplay === '' || /por fazer/i.test(rawDateDisplay)),
+      isDateBlank:
+        !parsedRowDate &&
+        (rawDateDisplay === "" || /por fazer/i.test(rawDateDisplay)),
       sheet: sheet,
-      dateColIndex: colMap.data !== -1 ? colMap.data + 1 : null
+      dateColIndex: colMap.data !== -1 ? colMap.data + 1 : null,
     });
   }
 
   if (subjectRows.length === 0) return null;
 
-  // Prioridade 1: Data exata (Caso você já tenha colocado a data nas próximas semanas)
+  // Prioridade 1: Data exata
   for (let i = 0; i < subjectRows.length; i++) {
     const sr = subjectRows[i];
     if (sr.dateObj && isSameDayMonth(sr.dateObj, targetDateObj)) {
       return {
         summary: sr.summary,
         aulas: sr.aulas,
+        bimestre: sr.bimestre,
         links: sr.richLinks,
         wasDateBlank: false,
         sheet: sr.sheet,
         rowNumber: sr.rowNumber,
-        dateColIndex: sr.dateColIndex
+        dateColIndex: sr.dateColIndex,
       };
     }
   }
 
-  // Prioridade 2: Próxima linha sem data após a última aula dada (com data <= data alvo da semana)
+  // Prioridade 2: Próxima linha sem data após a última aula dada
   let lastPastOrCurrentDatedIndex = -1;
   for (let i = 0; i < subjectRows.length; i++) {
-    if (subjectRows[i].dateObj && subjectRows[i].dateObj.getTime() <= targetDateObj.getTime()) {
+    if (
+      subjectRows[i].dateObj &&
+      subjectRows[i].dateObj.getTime() <= targetDateObj.getTime()
+    ) {
       lastPastOrCurrentDatedIndex = i;
     }
   }
 
   for (let i = lastPastOrCurrentDatedIndex + 1; i < subjectRows.length; i++) {
     const candidate = subjectRows[i];
-    if (candidate.isDateBlank && (candidate.summary !== '' || candidate.aulas !== '')) {
+    if (
+      candidate.isDateBlank &&
+      (candidate.summary !== "" || candidate.aulas !== "")
+    ) {
       return {
         summary: candidate.summary,
         aulas: candidate.aulas,
+        bimestre: candidate.bimestre,
         links: candidate.richLinks,
         wasDateBlank: true,
         sheet: candidate.sheet,
         rowNumber: candidate.rowNumber,
-        dateColIndex: candidate.dateColIndex
+        dateColIndex: candidate.dateColIndex,
       };
     }
   }
@@ -119,30 +165,35 @@ function parsePaCellInfo(cellText) {
   const trimmed = cellText.trim();
 
   if (/^Eletiva\b/i.test(trimmed)) {
-    const lines = trimmed.split('\n').map(l => l.trim()).filter(Boolean);
-    let eletivaTitle = 'Experimentos de Física Mão na Massa';
-    if (lines[0].includes(':')) {
-      eletivaTitle = lines[0].split(':')[1].trim() || eletivaTitle;
-    } else if (lines.length > 1 && !lines[1].startsWith('TEMA')) {
+    const lines = trimmed
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    let eletivaTitle = "Experimentos de Física Mão na Massa";
+    if (lines[0].includes(":")) {
+      eletivaTitle = lines[0].split(":")[1].trim() || eletivaTitle;
+    } else if (lines.length > 1 && !lines[1].startsWith("TEMA")) {
       eletivaTitle = lines[1];
     }
 
-    const modMatch = trimmed.match(/MODALIDADE ORGANIZATIVA:\s*([\s\S]*?)\s*(?:AGRUPAMENTO:|$)/i);
-    const modContent = modMatch ? modMatch[1].trim() : '';
+    const modMatch = trimmed.match(
+      /MODALIDADE ORGANIZATIVA:\s*([\s\S]*?)\s*(?:AGRUPAMENTO:|$)/i,
+    );
+    const modContent = modMatch ? modMatch[1].trim() : "";
 
     return {
-      className: 'Eletiva',
-      tabName: 'Eletiva',
+      className: "Eletiva",
+      tabName: "Eletiva",
       grade: 0,
       noTv: false,
       isEletiva: true,
       eletivaTitle: eletivaTitle,
-      subject: 'Eletiva',
-      hasModalidade: modContent.length > 5
+      subject: "Eletiva",
+      hasModalidade: modContent.length > 5,
     };
   }
 
-  if (!trimmed.includes('Turma:')) return null;
+  if (!trimmed.includes("Turma:")) return null;
 
   const turmaMatch = trimmed.match(/Turma:\s*([^\n\r]+)/i);
   const compMatch = trimmed.match(/COMPONENTE CURRICULAR:\s*([^\n\r]+)/i);
@@ -152,14 +203,16 @@ function parsePaCellInfo(cellText) {
   const rawSubject = compMatch[1].trim();
 
   let matchedKey = null;
-  Object.keys(CONFIG.CLASS_MAP).forEach(k => {
+  Object.keys(CONFIG.CLASS_MAP).forEach((k) => {
     if (rawClassName.toLowerCase().includes(k.toLowerCase())) matchedKey = k;
   });
   if (!matchedKey) return null;
 
   const classMeta = CONFIG.CLASS_MAP[matchedKey];
-  const modMatch = trimmed.match(/MODALIDADE ORGANIZATIVA:\s*([\s\S]*?)\s*AGRUPAMENTO:/i);
-  const modContent = modMatch ? modMatch[1].trim() : '';
+  const modMatch = trimmed.match(
+    /MODALIDADE ORGANIZATIVA:\s*([\s\S]*?)\s*AGRUPAMENTO:/i,
+  );
+  const modContent = modMatch ? modMatch[1].trim() : "";
 
   return {
     className: matchedKey,
@@ -167,37 +220,45 @@ function parsePaCellInfo(cellText) {
     grade: classMeta.grade,
     noTv: classMeta.noTv,
     isEletiva: false,
-    subject: /rob[oó]tica/i.test(rawSubject) ? 'Robótica' : 'Física',
-    hasModalidade: modContent.length > 5
+    subject: /rob[oó]tica/i.test(rawSubject) ? "Robótica" : "Física",
+    hasModalidade: modContent.length > 5,
   };
 }
 
 function loadEducEspData(ss) {
   const map = {};
-  const sheet = ss.getSheetByName('Educ. Esp.');
+  const sheet = ss.getSheetByName("Educ. Esp.");
   if (!sheet) return map;
 
   const rows = sheet.getDataRange().getDisplayValues();
   const allStudents = [];
 
   for (let i = 1; i < rows.length; i++) {
-    const name = String(rows[i][0] || '').trim();
-    const room = String(rows[i][1] || '').trim();
-    const desc = String(rows[i][2] || '').trim();
+    const name = String(rows[i][0] || "").trim();
+    const room = String(rows[i][1] || "").trim();
+    const desc = String(rows[i][2] || "").trim();
     if (!name || !room) continue;
     if (!map[room]) map[room] = [];
-    const studentObj = { name: name, cleanName: name.replace(/^\*\s*/, '').toLowerCase(), description: desc };
+    const studentObj = {
+      name: name,
+      cleanName: name.replace(/^\*\s*/, "").toLowerCase(),
+      description: desc,
+    };
     map[room].push(studentObj);
     allStudents.push(studentObj);
   }
 
-  const eletivaSheet = ss.getSheetByName('Eletiva');
+  const eletivaSheet = ss.getSheetByName("Eletiva");
   if (eletivaSheet && allStudents.length > 0) {
-    const eletivaText = eletivaSheet.getDataRange().getDisplayValues().map(r => String(r[0] || '').toLowerCase()).join('\n');
-    allStudents.forEach(st => {
+    const eletivaText = eletivaSheet
+      .getDataRange()
+      .getDisplayValues()
+      .map((r) => String(r[0] || "").toLowerCase())
+      .join("\n");
+    allStudents.forEach((st) => {
       if (st.cleanName && eletivaText.includes(st.cleanName)) {
-        if (!map['Eletiva']) map['Eletiva'] = [];
-        map['Eletiva'].push(st);
+        if (!map["Eletiva"]) map["Eletiva"] = [];
+        map["Eletiva"].push(st);
       }
     });
   }
@@ -216,13 +277,28 @@ function parseHeaderDate(headerStr) {
 
 function parseFlexibleDate(rawVal, displayStr) {
   if (rawVal instanceof Date && !isNaN(rawVal.getTime())) {
-    return new Date(rawVal.getFullYear(), rawVal.getMonth(), rawVal.getDate(), 12, 0, 0);
+    return new Date(
+      rawVal.getFullYear(),
+      rawVal.getMonth(),
+      rawVal.getDate(),
+      12,
+      0,
+      0,
+    );
   }
   if (!displayStr) return null;
   const s = displayStr.trim();
 
   let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (m) return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10), 12, 0, 0);
+  if (m)
+    return new Date(
+      parseInt(m[1], 10),
+      parseInt(m[2], 10) - 1,
+      parseInt(m[3], 10),
+      12,
+      0,
+      0,
+    );
 
   m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
   if (m) {
@@ -236,9 +312,25 @@ function parseFlexibleDate(rawVal, displayStr) {
     const day = parseInt(m[1], 10);
     const monStr = m[2].toLowerCase().substring(0, 3);
     const months = {
-      jan: 0, fev: 1, feb: 1, mar: 2, abr: 3, apr: 3, mai: 4, may: 4,
-      jun: 5, jul: 6, ago: 7, aug: 7, set: 8, sep: 8, out: 9, oct: 9,
-      nov: 10, dez: 11, dec: 11
+      jan: 0,
+      fev: 1,
+      feb: 1,
+      mar: 2,
+      abr: 3,
+      apr: 3,
+      mai: 4,
+      may: 4,
+      jun: 5,
+      jul: 6,
+      ago: 7,
+      aug: 7,
+      set: 8,
+      sep: 8,
+      out: 9,
+      oct: 9,
+      nov: 10,
+      dez: 11,
+      dec: 11,
     };
     if (months[monStr] !== undefined) {
       return new Date(new Date().getFullYear(), months[monStr], day, 12, 0, 0);
@@ -248,12 +340,28 @@ function parseFlexibleDate(rawVal, displayStr) {
 }
 
 function isSameDayMonth(d1, d2) {
-  return d1 && d2 && d1.getDate() === d2.getDate() && d1.getMonth() === d2.getMonth();
+  return (
+    d1 && d2 && d1.getDate() === d2.getDate() && d1.getMonth() === d2.getMonth()
+  );
 }
 
 function formatPtShortDate(dateObj) {
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const d = dateObj.getDate() < 10 ? `0${dateObj.getDate()}` : `${dateObj.getDate()}`;
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  const d =
+    dateObj.getDate() < 10 ? `0${dateObj.getDate()}` : `${dateObj.getDate()}`;
   return `${d}/${months[dateObj.getMonth()]}`;
 }
 
@@ -261,7 +369,7 @@ function extractRichTextUrls(richTextVal) {
   const urls = [];
   if (!richTextVal) return urls;
   const runs = richTextVal.getRuns();
-  runs.forEach(run => {
+  runs.forEach((run) => {
     const link = run.getLinkUrl();
     if (link && !urls.includes(link)) urls.push(link);
   });

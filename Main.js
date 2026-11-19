@@ -1,242 +1,356 @@
-/**
- * ============================================================================
- * 2. MAIN.GS - ORQUESTRADOR DE SEMANA E GERAÇÃO DE PLANOS
- * ============================================================================
- */
-
-function prepareNewWeek() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const ui = SpreadsheetApp.getUi();
-  const baseSheet = ss.getSheetByName('PA (Base)');
-  let atualSheet = ss.getSheetByName('PA (Atual)');
-
-  if (!baseSheet) {
-    ui.alert('❌ Erro: A aba "PA (Base)" não foi encontrada.');
-    return;
-  }
-
-  const resp = ui.prompt(
-    '📅 Preparar Nova Semana',
-    'Digite a data da SEGUNDA-FEIRA da semana desejada (formato DD/MM/AAAA, ex: 16/11/2026):',
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (resp.getSelectedButton() !== ui.Button.OK) return;
-
-  const dateParts = resp.getResponseText().trim().split('/');
-  if (dateParts.length !== 3) {
-    ui.alert('❌ Formato inválido. Use DD/MM/AAAA (ex: 16/11/2026).');
-    return;
-  }
-
-  const monday = new Date(
-    parseInt(dateParts[2], 10),
-    parseInt(dateParts[1], 10) - 1,
-    parseInt(dateParts[0], 10),
-    12, 0, 0
-  );
-
-  if (isNaN(monday.getTime())) {
-    ui.alert('❌ Data inválida.');
-    return;
-  }
-
-  if (!atualSheet) {
-    atualSheet = baseSheet.copyTo(ss).setName('PA (Atual)');
-  } else {
-    atualSheet.clear();
-    baseSheet.getDataRange().copyTo(atualSheet.getRange(1, 1));
-  }
-
-  const dayNames = ['SEG', 'TER', 'QUA', 'QUI', 'SEX'];
-  const oneDayMs = 24 * 60 * 60 * 1000;
-  for (let i = 0; i < 5; i++) {
-    const d = new Date(monday.getTime() + (i * oneDayMs));
-    const formatted = Utilities.formatDate(d, CONFIG.TIMEZONE, 'dd/MM/yy');
-    atualSheet.getRange(4, 2 + i).setValue(`${formatted}\n${dayNames[i]}`);
-  }
-
-  ss.setActiveSheet(atualSheet);
-  ui.alert('✅ Semana preparada em "PA (Atual)"! Agora você pode gerar os planos.');
-}
-
-function generateAllWeekPlans() {
-  runPlanGeneration(null);
-}
-
-function generatePlanForActiveTab() {
-  const activeTabName = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet().getName();
-  if (!CONFIG.TAB_TO_FULLNAME[activeTabName]) {
-    SpreadsheetApp.getUi().alert(
-      `⚠️ Você está na aba "${activeTabName}".\n\n` +
-      `Para usar esta opção, entre primeiro na aba de uma turma (ex: "1º HO", "2º LE", "3º AL" ou "Eletiva").`
-    );
-    return;
-  }
-  runPlanGeneration(activeTabName);
-}
-
 function runPlanGeneration(filterTabName) {
+  const opLabel = filterTabName
+    ? `Gerar Plano (${filterTabName})`
+    : "Gerar Todos os Planos da Semana";
+  const log = new ExecutionLogger(opLabel, {
+    filterTabName: filterTabName || "ALL",
+  });
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
   const props = PropertiesService.getScriptProperties();
-  const apiKey = props.getProperty('GEMINI_API_KEY');
+  const apiKey = props.getProperty("GEMINI_API_KEY");
 
-  if (!apiKey) {
-    ui.alert('⚠️ Chave da API Gemini não configurada. Acesse "🤖 Planos PEI > 5. Configurar Chave da API" primeiro.');
-    return;
-  }
+  try {
+    if (!apiKey) {
+      log.error(
+        "AUTH_CONFIG",
+        "GEMINI_API_KEY não configurada em ScriptProperties.",
+      );
+      ui.alert(
+        '⚠️ Chave da API Gemini não configurada. Acesse "🤖 Planos PEI > 6. Configurar Chave da API".',
+      );
+      return;
+    }
 
-  const paSheet = ss.getSheetByName('PA (Atual)');
-  if (!paSheet) {
-    ui.alert('❌ Aba "PA (Atual)" não encontrada.');
-    return;
-  }
+    const paSheet = ss.getSheetByName("PA (Atual)");
+    if (!paSheet) {
+      log.error("SHEET_LOOKUP", 'Aba "PA (Atual)" não encontrada na planilha.');
+      ui.alert('❌ Aba "PA (Atual)" não encontrada.');
+      return;
+    }
 
-  const headerRange = paSheet.getRange(4, 2, 1, 5).getDisplayValues()[0];
-  const colDates = headerRange.map(text => parseHeaderDate(text));
+    log.timeStart("Scan_PA_Atual", { sheet: "PA (Atual)" });
+    const headerRange = paSheet.getRange(4, 2, 1, 5).getDisplayValues()[0];
+    const colDates = headerRange.map((text) => parseHeaderDate(text));
+    const gridRange = paSheet.getRange(5, 2, 8, 5);
+    const gridValues = gridRange.getDisplayValues();
 
-  const gridRange = paSheet.getRange(5, 2, 8, 5);
-  const gridValues = gridRange.getDisplayValues();
-
-  const blocks = [];
-  for (let col = 0; col < 5; col++) {
-    const dayDate = colDates[col];
-    if (!dayDate) continue;
-
-    let row = 0;
-    while (row < 8) {
-      const cellText = gridValues[row][col];
-      const slotInfo = parsePaCellInfo(cellText);
-
-      if (!slotInfo) {
-        row++;
+    const blocks = [];
+    for (let col = 0; col < 5; col++) {
+      const dayDate = colDates[col];
+      if (!dayDate) {
+        log.warn(
+          "Scan_PA_Atual",
+          `Coluna ${col + 2} sem data válida no cabeçalho`,
+          { rawHeader: headerRange[col] },
+        );
         continue;
       }
 
-      if (filterTabName && slotInfo.tabName !== filterTabName) {
-        row++;
-        continue;
-      }
+      let row = 0;
+      while (row < 8) {
+        const cellText = gridValues[row][col];
+        const slotInfo = parsePaCellInfo(cellText);
 
-      let isDouble = false;
-      let secondCellInfo = null;
-      if (row + 1 < 8) {
-        const nextCellText = gridValues[row + 1][col];
-        const nextSlotInfo = parsePaCellInfo(nextCellText);
         if (
-          nextSlotInfo &&
-          nextSlotInfo.className === slotInfo.className &&
-          nextSlotInfo.subject === slotInfo.subject
+          !slotInfo ||
+          (filterTabName && slotInfo.tabName !== filterTabName)
         ) {
-          isDouble = true;
-          secondCellInfo = nextSlotInfo;
+          row++;
+          continue;
         }
+
+        let isDouble = false;
+        let secondCellInfo = null;
+        if (row + 1 < 8) {
+          const nextSlotInfo = parsePaCellInfo(gridValues[row + 1][col]);
+          if (
+            nextSlotInfo &&
+            nextSlotInfo.className === slotInfo.className &&
+            nextSlotInfo.subject === slotInfo.subject
+          ) {
+            isDouble = true;
+            secondCellInfo = nextSlotInfo;
+          }
+        }
+
+        const firstAlreadyFilled = slotInfo.hasModalidade;
+        const secondAlreadyFilled = isDouble
+          ? secondCellInfo.hasModalidade
+          : true;
+
+        if (!firstAlreadyFilled || !secondAlreadyFilled) {
+          blocks.push({
+            colIndex: col + 2,
+            row1: row + 5,
+            row2: isDouble ? row + 6 : null,
+            isDouble: isDouble,
+            isEletiva: Boolean(slotInfo.isEletiva),
+            eletivaTitle:
+              slotInfo.eletivaTitle || "Experimentos de Física Mão na Massa",
+            dateObj: dayDate,
+            dateStr: Utilities.formatDate(
+              dayDate,
+              CONFIG.TIMEZONE,
+              "dd/MM/yyyy",
+            ),
+            shortDateStr: formatPtShortDate(dayDate),
+            className: slotInfo.className,
+            tabName: slotInfo.tabName,
+            grade: slotInfo.grade,
+            noTv: slotInfo.noTv,
+            subject: slotInfo.subject,
+          });
+        }
+
+        row += isDouble ? 2 : 1;
       }
+    }
+    log.timeEnd("Scan_PA_Atual", { pendingBlocks: blocks.length });
+    log.checkpoint("PA_SCANNED", { pendingBlocks: blocks.length });
 
-      const firstAlreadyFilled = slotInfo.hasModalidade;
-      const secondAlreadyFilled = isDouble ? secondCellInfo.hasModalidade : true;
+    if (blocks.length === 0) {
+      log.info("RUN_END", "Nenhum bloco pendente encontrado em PA (Atual).");
+      ui.alert(
+        "ℹ️ Todos os planos aplicáveis já possuem a MODALIDADE ORGANIZATIVA preenchida!",
+      );
+      return;
+    }
 
-      if (!firstAlreadyFilled || !secondAlreadyFilled) {
-        blocks.push({
-          colIndex: col + 2,
-          row1: row + 5,
-          row2: isDouble ? row + 6 : null,
-          isDouble: isDouble,
-          isEletiva: Boolean(slotInfo.isEletiva),
-          eletivaTitle: slotInfo.eletivaTitle || 'Experimentos de Física Mão na Massa',
-          dateObj: dayDate,
-          dateStr: Utilities.formatDate(dayDate, CONFIG.TIMEZONE, 'dd/MM/yyyy'),
-          shortDateStr: formatPtShortDate(dayDate),
-          className: slotInfo.className,
-          tabName: slotInfo.tabName,
-          grade: slotInfo.grade,
-          noTv: slotInfo.noTv,
-          subject: slotInfo.subject,
-          cell1Text: cellText,
-          cell2Text: isDouble ? gridValues[row + 1][col] : null
-        });
+    log.timeStart("Draft_Matching", { blockCount: blocks.length });
+    const missingDrafts = [];
+    const readyBlocks = [];
+
+    blocks.forEach((block) => {
+      const draft = findDraftInClassSheet(
+        ss,
+        block.tabName,
+        block.subject,
+        block.dateObj,
+        block.isEletiva,
+        log,
+      );
+      if (!draft || (!draft.summary && !draft.aulas)) {
+        missingDrafts.push(
+          `• ${block.shortDateStr} | ${block.tabName} (${block.subject})`,
+        );
+      } else {
+        block.draft = draft;
+        readyBlocks.push(block);
       }
-
-      row += isDouble ? 2 : 1;
-    }
-  }
-
-  if (blocks.length === 0) {
-    ui.alert('ℹ️ Todos os planos aplicáveis já possuem a MODALIDADE ORGANIZATIVA preenchida em "PA (Atual)"!');
-    return;
-  }
-
-  const missingDrafts = [];
-  const readyBlocks = [];
-
-  blocks.forEach(block => {
-    const draft = findDraftInClassSheet(ss, block.tabName, block.subject, block.dateObj, block.isEletiva);
-    if (!draft || (!draft.summary && !draft.aulas)) {
-      missingDrafts.push(`• ${block.shortDateStr} | ${block.tabName} (${block.subject})`);
-    } else {
-      block.draft = draft;
-      readyBlocks.push(block);
-    }
-  });
-
-  if (missingDrafts.length > 0) {
-    const msg =
-      `⚠️ Atenção: Os seguintes horários estão sem rascunho nas abas das turmas:\n\n` +
-      missingDrafts.join('\n') +
-      `\n\nDeseja gerar os ${readyBlocks.length} plano(s) disponíveis agora e deixar estes em branco?`;
-    const confirm = ui.alert('Rascunhos Pendentes', msg, ui.ButtonSet.YES_NO);
-    if (confirm !== ui.Button.YES) return;
-  }
-
-  if (readyBlocks.length === 0) {
-    ui.alert('⚠️ Nenhum rascunho encontrado para gerar planos.');
-    return;
-  }
-
-  const educEspMap = loadEducEspData(ss);
-  const guiaSummary = getPrioritizedCurriculumText(apiKey);
-  const modelName = getActiveModelName();
-
-  let successCount = 0;
-  readyBlocks.forEach(block => {
-    ss.toast(
-      `Gerando (${modelName}): ${block.tabName} - ${block.subject} (${block.shortDateStr})...`,
-      '🤖 Gemini trabalhando',
-      25
-    );
-
-    const studentsEsp = educEspMap[block.tabName] || [];
-    const pdfBlobs = block.isEletiva ? [] : resolveLecturePdfs(block);
-
-    const aiResult = generateLessonPlanWithGemini({
-      apiKey: apiKey,
-      modelName: modelName,
-      block: block,
-      studentsEsp: studentsEsp,
-      pdfBlobs: pdfBlobs,
-      guiaSummary: guiaSummary
+    });
+    log.timeEnd("Draft_Matching", {
+      readyCount: readyBlocks.length,
+      missingCount: missingDrafts.length,
     });
 
-    if (aiResult) {
-      const updatedCell1 = buildFormattedCellText(block, aiResult.aula_1, studentsEsp);
-      paSheet.getRange(block.row1, block.colIndex).setValue(updatedCell1);
-
-      if (block.isDouble && block.row2) {
-        const part2Data = aiResult.aula_2 || aiResult.aula_1;
-        const updatedCell2 = buildFormattedCellText(block, part2Data, studentsEsp);
-        paSheet.getRange(block.row2, block.colIndex).setValue(updatedCell2);
+    if (missingDrafts.length > 0) {
+      log.warn(
+        "Draft_Matching",
+        "Rascunhos ausentes para alguns blocos",
+        missingDrafts,
+      );
+      const msg =
+        `⚠️ Atenção: Os seguintes horários estão sem rascunho:\n\n` +
+        missingDrafts.join("\n") +
+        `\n\nDeseja gerar os ${readyBlocks.length} plano(s) disponíveis agora e deixar estes em branco?`;
+      if (
+        ui.alert("Rascunhos Pendentes", msg, ui.ButtonSet.YES_NO) !==
+        ui.Button.YES
+      ) {
+        log.info(
+          "RUN_END",
+          "Cancelado pelo usuário no diálogo de rascunhos pendentes.",
+        );
+        return;
       }
-
-      if (block.draft.wasDateBlank && block.draft.sheet && block.draft.rowNumber && block.draft.dateColIndex) {
-        block.draft.sheet
-          .getRange(block.draft.rowNumber, block.draft.dateColIndex)
-          .setValue(block.shortDateStr);
-      }
-
-      successCount++;
     }
-  });
 
-  SpreadsheetApp.flush();
-  ui.alert(`🎉 Concluído! ${successCount} bloco(s) de aula foram gerados e preenchidos em "PA (Atual)".`);
+    if (readyBlocks.length === 0) {
+      log.warn("RUN_END", "Zero blocos prontos após validação de rascunhos.");
+      ui.alert("⚠️ Nenhum rascunho encontrado para gerar planos.");
+      return;
+    }
+
+    log.timeStart("Load_EducEsp_And_Guia");
+    const educEspMap = loadEducEspData(ss);
+    const guiaSummary = getPrioritizedCurriculumText(apiKey, log);
+    log.timeEnd("Load_EducEsp_And_Guia");
+
+    const modelName = getActiveModelName();
+    const pdfBase64Cache = {};
+
+    log.timeStart("Drive_And_Payload_Build", {
+      modelName: modelName,
+      readyBlocks: readyBlocks.length,
+    });
+    log.checkpoint("BUILDING_PAYLOADS", { modelName: modelName });
+    ss.toast(
+      `Preparando ${readyBlocks.length} planos em paralelo (${modelName})...`,
+      "⚡ Acelerando",
+      15,
+    );
+
+    const preparedItems = readyBlocks.map((block) => {
+      const studentsEsp = educEspMap[block.tabName] || [];
+      const encodedPdfs = block.isEletiva
+        ? []
+        : resolveLecturePdfsCached(block, pdfBase64Cache, log);
+      const requestObj = buildGeminiRequestPayload({
+        apiKey: apiKey,
+        modelName: modelName,
+        block: block,
+        studentsEsp: studentsEsp,
+        encodedPdfs: encodedPdfs,
+        guiaSummary: guiaSummary,
+        log: log,
+      });
+      return { block: block, studentsEsp: studentsEsp, request: requestObj };
+    });
+    log.timeEnd("Drive_And_Payload_Build", {
+      cachedPdfKeys: Object.keys(pdfBase64Cache).length,
+    });
+
+    let successCount = 0;
+    let errorCount = 0;
+    const totalBatches = Math.ceil(preparedItems.length / CONFIG.BATCH_SIZE);
+
+    for (let i = 0; i < preparedItems.length; i += CONFIG.BATCH_SIZE) {
+      const batch = preparedItems.slice(i, i + CONFIG.BATCH_SIZE);
+      const batchNum = Math.floor(i / CONFIG.BATCH_SIZE) + 1;
+      const batchLabel = `Batch_${batchNum}_of_${totalBatches}`;
+
+      log.checkpoint(`BATCH_${batchNum}_START`, { batchSize: batch.length });
+      ss.toast(
+        `Processando lote paralelo ${batchNum}/${totalBatches} (${batch.length} aulas)...`,
+        "🚀 Gemini API",
+        25,
+      );
+
+      log.timeStart(batchLabel, { batchNum: batchNum, count: batch.length });
+      const httpRequests = batch.map((item) => item.request);
+      const httpResponses = UrlFetchApp.fetchAll(httpRequests);
+      log.timeEnd(batchLabel, { batchNum: batchNum });
+
+      log.timeStart(`Write_Batch_${batchNum}`);
+      httpResponses.forEach((resp, idx) => {
+        const item = batch[idx];
+        const block = item.block;
+        const statusCode = resp.getResponseCode();
+        const respText = resp.getContentText();
+
+        if (statusCode === 200) {
+          const parsedPlan = parseGeminiJsonResponse(respText, block, log);
+          if (parsedPlan && parsedPlan.aula_1) {
+            const updatedCell1 = buildFormattedCellText(
+              block,
+              parsedPlan.aula_1,
+              item.studentsEsp,
+            );
+            paSheet.getRange(block.row1, block.colIndex).setValue(updatedCell1);
+
+            if (block.isDouble && block.row2) {
+              const part2Data = parsedPlan.aula_2 || parsedPlan.aula_1;
+              const updatedCell2 = buildFormattedCellText(
+                block,
+                part2Data,
+                item.studentsEsp,
+              );
+              paSheet
+                .getRange(block.row2, block.colIndex)
+                .setValue(updatedCell2);
+            }
+
+            if (
+              block.draft.wasDateBlank &&
+              block.draft.sheet &&
+              block.draft.rowNumber &&
+              block.draft.dateColIndex
+            ) {
+              block.draft.sheet
+                .getRange(block.draft.rowNumber, block.draft.dateColIndex)
+                .setValue(block.shortDateStr);
+              log.info(
+                "Auto_Date",
+                `Data ${block.shortDateStr} preenchida em ${block.tabName} linha ${block.draft.rowNumber}`,
+              );
+            }
+
+            successCount++;
+            log.info(
+              "Block_Success",
+              `${block.tabName} (${block.subject}) - ${block.shortDateStr}`,
+              {
+                isDouble: block.isDouble,
+                hasPart2: Boolean(parsedPlan.aula_2),
+              },
+            );
+          } else {
+            errorCount++;
+            log.error(
+              "Block_Parse_Fail",
+              `JSON incompleto/inválido para ${block.tabName} (${block.subject})`,
+              {
+                date: block.shortDateStr,
+                hasAula1: Boolean(parsedPlan && parsedPlan.aula_1),
+                rawPreview: respText.slice(0, 300),
+              },
+            );
+          }
+        } else {
+          errorCount++;
+          log.error(
+            "Gemini_HTTP_Error",
+            `HTTP ${statusCode} em ${block.tabName} (${block.subject})`,
+            {
+              date: block.shortDateStr,
+              model: modelName,
+              bodyPreview: respText.slice(0, 400),
+            },
+          );
+        }
+      });
+      log.timeEnd(`Write_Batch_${batchNum}`);
+      log.checkpoint(`BATCH_${batchNum}_DONE`, {
+        successSoFar: successCount,
+        errorsSoFar: errorCount,
+      });
+    }
+
+    log.timeStart("Spreadsheet_Flush");
+    SpreadsheetApp.flush();
+    log.timeEnd("Spreadsheet_Flush");
+    log.checkpoint("COMPLETED", {
+      successCount: successCount,
+      errorCount: errorCount,
+    });
+
+    if (errorCount > 0) {
+      ui.alert(
+        `⚠️ Concluído com ressalvas!\n\n` +
+          `• Gerados com sucesso: ${successCount}\n` +
+          `• Falhas: ${errorCount}\n\n` +
+          `Abra "🤖 Planos PEI > 4. Ver Logs da Última Execução" para ver o gargalo e o erro exato.`,
+      );
+    } else {
+      ui.alert(
+        `🎉 Concluído com sucesso! Todos os ${successCount} bloco(s) foram gerados em paralelo.`,
+      );
+    }
+  } catch (err) {
+    log.error(
+      "UNHANDLED_CRASH",
+      `Crash na etapa "${log.lastCheckpoint}"`,
+      err,
+      {
+        filterTabName: filterTabName || "ALL",
+      },
+    );
+    ui.alert(
+      `❌ Erro crítico na etapa "${log.lastCheckpoint}": ${err.message}\n\n` +
+        `Abra "🤖 Planos PEI > 4. Ver Logs da Última Execução" para ver o stack trace e os tempos.`,
+    );
+  } finally {
+    log.flushToStorage();
+  }
 }
