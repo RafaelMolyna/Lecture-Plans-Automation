@@ -302,7 +302,7 @@ function callGeminiTextOnlyWithPdf(apiKey, promptText, pdfBlob) {
     : "";
 }
 
-function buildFormattedCellText(block, planPart, studentsEsp, log) {
+function buildFormattedCellRichText(block, planPart, studentsEsp, log) {
   let recursos = planPart.recursos || "";
   if (block.noTv) {
     const hadTv = /televisor/i.test(recursos);
@@ -321,26 +321,76 @@ function buildFormattedCellText(block, planPart, studentsEsp, log) {
       : planPart.acessibilidade_curricular ||
         "Participação prática acompanhada.";
 
-  if (block.isEletiva) {
-    return (
-      `Eletiva: ${block.eletivaTitle}\n\n` +
-      `TEMA DA AULA: ${planPart.tema_da_aula || ""}\n\n` +
-      `RECURSOS: ${recursos}\n\n` +
-      `MODALIDADE ORGANIZATIVA: ${planPart.modalidade_organizativa || ""}\n\n` +
-      `AGRUPAMENTO: ${planPart.agrupamento || "Grupos produtivos / Bancadas."}\n\n` +
-      `ACESSIBILIDADE CURRICULAR: ${acessibilidade}`
-    );
-  }
+  const sections = block.isEletiva
+    ? [
+        {
+          label: `Eletiva: ${block.eletivaTitle}`,
+          value: "",
+          boldWholeLine: true,
+        },
+        { label: "TEMA DA AULA: ", value: planPart.tema_da_aula || "" },
+        { label: "RECURSOS: ", value: recursos },
+        {
+          label: "MODALIDADE ORGANIZATIVA: ",
+          value: planPart.modalidade_organizativa || "",
+        },
+        {
+          label: "AGRUPAMENTO: ",
+          value: planPart.agrupamento || "Grupos produtivos / Bancadas.",
+        },
+        { label: "ACESSIBILIDADE CURRICULAR: ", value: acessibilidade },
+      ]
+    : [
+        { label: "Turma: ", value: block.className },
+        { label: "COMPONENTE CURRICULAR: ", value: block.subject },
+        { label: "TEMA DA AULA: ", value: planPart.tema_da_aula || "" },
+        { label: "RECURSOS: ", value: recursos },
+        {
+          label: "CRITÉRIOS DE AVALIAÇÃO: ",
+          value: planPart.criterios_avaliacao || "",
+        },
+        { label: "HABILIDADES: ", value: planPart.habilidades || "" },
+        {
+          label: "MODALIDADE ORGANIZATIVA: ",
+          value: planPart.modalidade_organizativa || "",
+        },
+        { label: "AGRUPAMENTO: ", value: planPart.agrupamento || "" },
+        { label: "ACESSIBILIDADE CURRICULAR: ", value: acessibilidade },
+      ];
 
-  return (
-    `Turma: ${block.className}\n\n` +
-    `COMPONENTE CURRICULAR: ${block.subject}\n\n` +
-    `TEMA DA AULA: ${planPart.tema_da_aula || ""}\n\n` +
-    `RECURSOS: ${recursos}\n\n` +
-    `CRITÉRIOS DE AVALIAÇÃO: ${planPart.criterios_avaliacao || ""}\n\n` +
-    `HABILIDADES: ${planPart.habilidades || ""}\n\n` +
-    `MODALIDADE ORGANIZATIVA: ${planPart.modalidade_organizativa || ""}\n\n` +
-    `AGRUPAMENTO: ${planPart.agrupamento || ""}\n\n` +
-    `ACESSIBILIDADE CURRICULAR: ${acessibilidade}`
-  );
+  const boldStyle = SpreadsheetApp.newTextStyle().setBold(true).build();
+  const normalStyle = SpreadsheetApp.newTextStyle().setBold(false).build();
+
+  let fullText = "";
+  const ranges = [];
+
+  sections.forEach((sec, idx) => {
+    const labelStart = fullText.length;
+    fullText += sec.label;
+    const labelEnd = fullText.length;
+    ranges.push({ start: labelStart, end: labelEnd, style: boldStyle });
+
+    if (sec.value) {
+      const valStart = fullText.length;
+      fullText += sec.value;
+      const valEnd = fullText.length;
+      ranges.push({ start: valStart, end: valEnd, style: normalStyle });
+    }
+
+    if (idx < sections.length - 1) {
+      const sepStart = fullText.length;
+      fullText += "\n\n";
+      const sepEnd = fullText.length;
+      ranges.push({ start: sepStart, end: sepEnd, style: normalStyle });
+    }
+  });
+
+  const builder = SpreadsheetApp.newRichTextValue().setText(fullText);
+  ranges.forEach((r) => {
+    if (r.end > r.start) {
+      builder.setTextStyle(r.start, r.end, r.style);
+    }
+  });
+
+  return builder.build();
 }

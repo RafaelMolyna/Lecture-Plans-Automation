@@ -403,7 +403,9 @@ function runPlanGeneration(filterTabName) {
               item.studentsEsp,
               log,
             );
-            paSheet.getRange(block.row1, block.colIndex).setValue(updatedCell1);
+            paSheet
+              .getRange(block.row1, block.colIndex)
+              .setRichTextValue(updatedCell1);
 
             if (block.isDouble && block.row2) {
               const part2Data = parsedPlan.aula_2 || parsedPlan.aula_1;
@@ -421,7 +423,7 @@ function runPlanGeneration(filterTabName) {
               );
               paSheet
                 .getRange(block.row2, block.colIndex)
-                .setValue(updatedCell2);
+                .setRichTextValue(updatedCell2);
             }
 
             if (
