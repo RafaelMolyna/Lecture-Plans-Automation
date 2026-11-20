@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * 5. GEMINISERVICE.GS - CONSTRUTOR DE PAYLOAD PARALELO E PARSER DE RESPOSTAS
+ * 5. GEMINISERVICE.JS - PAYLOAD DINÂMICO (MATERIAIS/CRITÉRIOS) E RICHTEXT
  * ============================================================================
  */
 
@@ -9,6 +9,7 @@ function buildGeminiRequestPayload(params) {
     apiKey,
     modelName,
     block,
+    subjectMeta,
     studentsEsp,
     encodedPdfs,
     guiaSummary,
@@ -35,12 +36,12 @@ function buildGeminiRequestPayload(params) {
       mediaDecision = "NO_TV_WITH_PROJECTOR";
       mediaConstraintInstruction =
         `RESTRIÇÃO DE SALA (${block.tabName}): Esta sala NÃO possui Televisor. ` +
-        `PROIBIDO incluir "Televisor" em RECURSOS. Como o rascunho menciona vídeo ou simulação, utilize "Projetor" em RECURSOS.`;
+        `PROIBIDO incluir "Televisor" em RECURSOS (mesmo que apareça no catálogo usual). Como o rascunho menciona vídeo ou simulação, utilize "Projetor" em RECURSOS.`;
     } else {
       mediaDecision = "NO_TV_PRINTED_ONLY";
       mediaConstraintInstruction =
         `RESTRIÇÃO DE SALA (${block.tabName}): Esta sala NÃO possui Televisor. ` +
-        `PROIBIDO incluir "Televisor" ou "Projetor" em RECURSOS. Priorize "Material Impresso / Lista de Exercícios" e "Quadro Branco".`;
+        `PROIBIDO incluir "Televisor" ou "Projetor" em RECURSOS (mesmo que apareça no catálogo usual). Priorize "Material Impresso / Lista de Exercícios" e "Quadro Branco".`;
     }
   } else {
     mediaDecision = "TV_ALLOWED";
@@ -51,11 +52,7 @@ function buildGeminiRequestPayload(params) {
     log.info(
       "Media_Policy",
       `Política de mídia aplicada para ${block.tabName} (${block.subject})`,
-      {
-        noTv: block.noTv,
-        mentionsVideoOrSim,
-        mediaDecision,
-      },
+      { noTv: block.noTv, mentionsVideoOrSim, mediaDecision },
     );
   }
 
@@ -71,58 +68,70 @@ function buildGeminiRequestPayload(params) {
       `Sugira em "acessibilidade_curricular" uma adaptação prática, curta e específica para a aula de hoje considerando exatamente as capacidades descritas acima.`;
   }
 
-  const materialsPool = (CONFIG.MASTER_MATERIALS[block.subject] || []).join(
-    ", ",
-  );
+  const materialsPool =
+    (subjectMeta && subjectMeta.materials) ||
+    "Quadro Branco, Caderno do Estudante, Material Impresso";
+  const evalCriteriaBase =
+    (subjectMeta && subjectMeta.evalCriteria) ||
+    "Participação na aula, resposta às perguntas do professor e resolução das atividades propostas.";
+
+  const splitRule = block.isDouble
+    ? `A aula é uma DOBRADINHA (duas aulas seguidas de 50 minutos: "aula_1" e "aula_2"). Divida em planejamentos sequenciais e distintos (Parte 1: primeiros 50 min; Parte 2: segundos 50 min).`
+    : `A aula é SIMPLES (1 aula de 50 minutos). Preencha "aula_1" completamente e deixe "aula_2" igual a null.`;
+
   let systemPrompt = "";
 
-  if (block.isEletiva) {
-    systemPrompt = `Você é um professor especialista do Programa Ensino Integral (PEI) da SEDUC-SP (EE Matilde Maria Cremm) lecionando a disciplina ELETIVA "${block.eletivaTitle}".
-Sua tarefa é elaborar o Plano de Aula simplificado para a Eletiva (que NÃO exige Habilidades BNCC nem Critérios de Avaliação formais), redigido integralmente em Português do Brasil (pt-BR).
+  if (block.isSimplified) {
+    const titleLabel = block.customTitle || block.className;
+    systemPrompt = `Você é um professor especialista do Programa Ensino Integral (PEI) da SEDUC-SP lecionando "${titleLabel}".
+Sua tarefa é elaborar o Plano de Aula simplificado (sem Habilidades BNCC nem Critérios de Avaliação formais), redigido integralmente em Português do Brasil (pt-BR).
 
-DIRETRIZES DE PREENCHIMENTO DA ELETIVA:
-1. DOBRADINHA (SPLIT DE 50 MIN + 50 MIN):
-   - A Eletiva ocorre em duas aulas seguidas de 50 minutos ("aula_1" e "aula_2").
-   - Divida o rascunho do professor em duas etapas sequenciais e práticas de 50 min.
-2. RECURSOS:
-   - Baseie-se nos materiais citados no rascunho e no catálogo prático: [${materialsPool}].
+DIRETRIZES DE PREENCHIMENTO:
+1. ESTRUTURA DE TEMPO:
+   - ${splitRule}
+2. RECURSOS E RESTRIÇÃO DE SALA:
+   - ${mediaConstraintInstruction}
+   - Baseie-se nos materiais citados no rascunho e no catálogo usual: [${materialsPool}].
 3. MODALIDADE ORGANIZATIVA:
    - Descreva o passo a passo metodológico de cada aula de 50 minutos em frases separadas por ponto-e-vírgula (;).
 4. ACESSIBILIDADE CURRICULAR:
    - ${accessibilityInstruction}
 5. INSTRUÇÕES DE ESTILO/TAMANHO NO RASCUNHO:
-   - Caso o professor tenha escrito alguma instrução de estilo ou tamanho no rascunho (ex: "plano de aula curto com linguagem simples"), obedeça-a com prioridade máxima (sem copiar esse comando meta para o texto final).
+   - Caso o professor tenha escrito alguma instrução de estilo ou tamanho no rascunho, obedeça-a com prioridade máxima (sem copiar o comando meta para o texto final).
 
-Retorne APENAS um objeto JSON válido em Português (pt-BR) com a estrutura:
+Retorne APENAS um objeto JSON válido em Português (pt-BR):
 {
   "aula_1": { "tema_da_aula": "...", "recursos": "...", "modalidade_organizativa": "...", "agrupamento": "...", "acessibilidade_curricular": "..." },
   "aula_2": { "tema_da_aula": "...", "recursos": "...", "modalidade_organizativa": "...", "agrupamento": "...", "acessibilidade_curricular": "..." }
 }`;
   } else {
-    systemPrompt = `Você é um professor especialista do Programa Ensino Integral (PEI) da SEDUC-SP (EE Matilde Maria Cremm) lecionando ${block.subject} para o Ensino Médio (${block.className}).
+    systemPrompt = `Você é um professor especialista do Programa Ensino Integral (PEI) da SEDUC-SP lecionando ${block.subject} para a turma ${block.className}.
 Sua tarefa é elaborar o Plano de Aula estruturado seguindo rigorosamente as diretrizes da SEDUC-SP, redigido integralmente em Português do Brasil (pt-BR).
 
 DIRETRIZES DE PREENCHIMENTO:
-1. DOBRADINHA (SPLIT DE 50 MIN + 50 MIN):
-   - Foram anexados todos os PDFs das aulas listadas pelo professor. Use as anotações do rascunho do professor para saber quais aulas/tópicos priorizar em "aula_1" e em "aula_2".
-   - A aula é uma dobradinha (duas aulas seguidas de 50 minutos: "aula_1" e "aula_2").
-   - A equipe gestora exige que "aula_1" e "aula_2" tenham planejamentos sequenciais e distintos (Parte 1: primeiros 50 min; Parte 2: segundos 50 min).
+1. ESTRUTURA DE TEMPO:
+   - ${splitRule}
+   - Use as anotações do rascunho do professor e os PDFs anexados (se houver) para organizar o conteúdo.
 2. RECURSOS E RESTRIÇÃO DE HARDWARE DA SALA:
    - ${mediaConstraintInstruction}
-   - Catálogo de materiais habituais do professor para ${block.subject}: [${materialsPool}].
-   - Selecione apenas os recursos pertinentes à aula descrita no rascunho e acrescente novos materiais caso o rascunho cite algum experimento específico ou links de apoio.
-3. HABILIDADES (BNCC / CURRÍCULO PAULISTA):
-   - Se houver PDF da SEDUC anexado, extraia o código exato da habilidade (ex: EM13CNT101, EM13CNT301) e sua descrição em português.
-   - Se NÃO houver PDF anexado, consulte o catálogo do Guia do Currículo Priorizado abaixo e escolha o código EM13CNT mais próximo do tema:
-   ${guiaSummary ? guiaSummary : "(Use os códigos oficiais EM13CNT da BNCC de Ciências da Natureza para o Ensino Médio compatíveis com o tema)."}
-4. MODALIDADE ORGANIZATIVA:
+   - Catálogo usual do professor para ${block.subject}: [${materialsPool}].
+   - Selecione apenas os recursos pertinentes à aula descrita e acrescente materiais novos se o rascunho citar experimentos ou links específicos.
+3. CRITÉRIOS DE AVALIAÇÃO:
+   - Use como base os critérios usuais do professor para ${block.subject}:
+     ${evalCriteriaBase}
+   - Adapte brevemente para a atividade específica de hoje, mantendo o estilo objetivo.
+4. HABILIDADES (BNCC / CURRÍCULO PAULISTA):
+   - Se houver PDF da SEDUC anexado, extraia o código exato da habilidade e sua descrição em português.
+   - Se NÃO houver PDF anexado, consulte o Guia do Currículo Priorizado abaixo e escolha o código mais próximo do tema:
+   ${guiaSummary ? guiaSummary : "(Use os códigos oficiais da BNCC / Currículo Paulista compatíveis com a disciplina e o tema)."}
+5. MODALIDADE ORGANIZATIVA:
    - Escreva em tópicos ou frases separadas por ponto-e-vírgula (;), detalhando o passo a passo metodológico do professor naqueles 50 minutos.
-5. ACESSIBILIDADE CURRICULAR:
+6. ACESSIBILIDADE CURRICULAR:
    - ${accessibilityInstruction}
-6. INSTRUÇÕES DE ESTILO/TAMANHO NO RASCUNHO:
-   - Caso o professor tenha escrito alguma instrução de formatação, tamanho ou linguagem dentro do próprio rascunho (ex: "plano de aula curto com linguagem simples"), obedeça-a com prioridade máxima (sem incluir esse comando meta no texto final do plano).
+7. INSTRUÇÕES DE ESTILO/TAMANHO NO RASCUNHO:
+   - Caso o professor tenha escrito alguma instrução de formatação, tamanho ou linguagem dentro do próprio rascunho, obedeça-a com prioridade máxima (sem incluir esse comando meta no texto final).
 
-Retorne APENAS um objeto JSON válido em Português (pt-BR) com a estrutura exata abaixo:
+Retorne APENAS um objeto JSON válido em Português (pt-BR):
 {
   "aula_1": { "tema_da_aula": "...", "recursos": "...", "criterios_avaliacao": "...", "habilidades": "...", "modalidade_organizativa": "...", "agrupamento": "...", "acessibilidade_curricular": "..." },
   "aula_2": { "tema_da_aula": "...", "recursos": "...", "criterios_avaliacao": "...", "habilidades": "...", "modalidade_organizativa": "...", "agrupamento": "...", "acessibilidade_curricular": "..." }
@@ -183,7 +192,7 @@ Retorne APENAS um objeto JSON válido em Português (pt-BR) com a estrutura exat
       `Payload montado para ${block.tabName} (${block.subject})`,
       {
         date: block.shortDateStr,
-        isEletiva: block.isEletiva,
+        isSimplified: block.isSimplified,
         attachedPdfs: attachedCount,
         requestedPdfs: encodedPdfs.length,
         pdfBytesKB: Math.round(totalBytes / 1024),
@@ -261,9 +270,7 @@ function parseGeminiJsonResponse(responseText, block, log) {
         "Gemini_Parse",
         `Falha ao interpretar JSON retornado pelo Gemini em ${block.tabName}`,
         e,
-        {
-          rawPreview: responseText.slice(0, 350),
-        },
+        { rawPreview: responseText.slice(0, 350) },
       );
     }
     return null;
@@ -321,12 +328,14 @@ function buildFormattedCellRichText(block, planPart, studentsEsp, log) {
       : planPart.acessibilidade_curricular ||
         "Participação prática acompanhada.";
 
-  const sections = block.isEletiva
+  const sections = block.isSimplified
     ? [
         {
-          label: `Eletiva: ${block.eletivaTitle}`,
+          label: `${block.className}: ${block.customTitle || ""}`.replace(
+            /:\s*$/,
+            "",
+          ),
           value: "",
-          boldWholeLine: true,
         },
         { label: "TEMA DA AULA: ", value: planPart.tema_da_aula || "" },
         { label: "RECURSOS: ", value: recursos },

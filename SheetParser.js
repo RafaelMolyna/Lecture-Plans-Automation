@@ -1,15 +1,303 @@
 /**
  * ============================================================================
- * 3. SHEETPARSER.GS - LEITURA DE ABAS, BIMESTRE, DATAS E EDUCAÇÃO ESPECIAL
+ * 3. SHEETPARSER.JS - CONFIG DINÂMICA, PA SIMPLIFICADO, RASCUNHOS E EDUC. ESP.
  * ============================================================================
  */
+
+function normalizeKey(str) {
+  return String(str || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Carrega dinamicamente as abas "Turmas" e "Disciplinas".
+ */
+function loadRuntimeConfig(ss, log) {
+  const turmasSheet = ss.getSheetByName(CONFIG.TABS.TURMAS);
+  const discSheet = ss.getSheetByName(CONFIG.TABS.DISCIPLINAS);
+
+  if (!turmasSheet) {
+    throw new Error(`Aba "${CONFIG.TABS.TURMAS}" não encontrada na planilha.`);
+  }
+  if (!discSheet) {
+    throw new Error(
+      `Aba "${CONFIG.TABS.DISCIPLINAS}" não encontrada na planilha.`,
+    );
+  }
+
+  const classesList = [];
+  const classesByTab = {};
+  const classesByFullName = {};
+
+  const turmasRows = turmasSheet.getDataRange().getDisplayValues();
+  for (let i = 1; i < turmasRows.length; i++) {
+    const fullName = String(turmasRows[i][0] || "").trim();
+    const tab = String(turmasRows[i][1] || "").trim();
+    const grade = parseInt(turmasRows[i][2], 10) || 0;
+    const temTvStr = String(turmasRows[i][3] || "").trim();
+    const tipoPlano = String(turmasRows[i][4] || "Regular").trim();
+
+    if (!fullName && !tab) continue;
+
+    const classObj = {
+      fullName: fullName || tab,
+      tab: tab || fullName,
+      grade: grade,
+      noTv: /^(n[aã]o|nao|false|0)$/i.test(temTvStr),
+      isSimplified: /simplific/i.test(tipoPlano),
+      planType: tipoPlano,
+    };
+
+    classesList.push(classObj);
+    classesByTab[normalizeKey(classObj.tab)] = classObj;
+    classesByFullName[normalizeKey(classObj.fullName)] = classObj;
+  }
+
+  const subjectsList = [];
+  const subjectsByKey = {};
+  const subjectsByName = {};
+
+  const discRows = discSheet.getDataRange().getDisplayValues();
+  for (let i = 1; i < discRows.length; i++) {
+    const name = String(discRows[i][0] || "").trim();
+    const grade = parseInt(discRows[i][1], 10) || 0;
+    const rawFolder = String(discRows[i][2] || "").trim();
+    const lessonsPerPdf = Math.max(1, parseInt(discRows[i][3], 10) || 1);
+    const materials = String(discRows[i][4] || "").trim();
+    const evalCriteria = String(discRows[i][5] || "").trim();
+
+    if (!name) continue;
+
+    const cleanFolder =
+      !rawFolder || /^(\(vazio\)|vazio|-|n\/a)$/i.test(rawFolder)
+        ? null
+        : rawFolder;
+
+    const subjObj = {
+      name: name,
+      grade: grade,
+      driveFolder: cleanFolder,
+      lessonsPerPdf: lessonsPerPdf,
+      materials: materials,
+      evalCriteria: evalCriteria,
+    };
+
+    const key = `${normalizeKey(name)}_${grade}`;
+    subjectsList.push(subjObj);
+    subjectsByKey[key] = subjObj;
+    if (!subjectsByName[normalizeKey(name)]) {
+      subjectsByName[normalizeKey(name)] = subjObj;
+    }
+  }
+
+  const defaultSubject =
+    subjectsList.length > 0 ? subjectsList[0].name : "Física";
+
+  if (log) {
+    log.info(
+      "Config_Load",
+      "Configuração carregada das abas Turmas e Disciplinas",
+      {
+        turmasCount: classesList.length,
+        disciplinasCount: subjectsList.length,
+        defaultSubject,
+      },
+    );
+  }
+
+  return {
+    classesList,
+    classesByTab,
+    classesByFullName,
+    subjectsList,
+    subjectsByKey,
+    subjectsByName,
+    defaultSubject,
+  };
+}
+
+function getSubjectMeta(runtimeConfig, subjectName, grade) {
+  const norm = normalizeKey(subjectName);
+  return (
+    runtimeConfig.subjectsByKey[`${norm}_${grade}`] ||
+    runtimeConfig.subjectsByName[norm] || {
+      name: subjectName,
+      grade: grade,
+      driveFolder: null,
+      lessonsPerPdf: 1,
+      materials: "",
+      evalCriteria: "",
+    }
+  );
+}
+
+/**
+ * Localiza dinamicamente a linha de datas (SEG..SEX) e a faixa de aulas no PA.
+ */
+function detectPaGridLayout(paSheet) {
+  const lastRow = Math.max(12, paSheet.getLastRow());
+  const values = paSheet.getRange(1, 1, lastRow, 6).getDisplayValues();
+
+  let dateRow = 4;
+  for (let r = 0; r < Math.min(10, values.length); r++) {
+    let validDates = 0;
+    for (let c = 1; c <= 5; c++) {
+      if (parseHeaderDate(values[r][c])) validDates++;
+    }
+    if (validDates >= 3) {
+      dateRow = r + 1;
+      break;
+    }
+  }
+
+  const startPeriodRow = dateRow + 1;
+  let endPeriodRow = startPeriodRow;
+  for (let r = startPeriodRow - 1; r < values.length; r++) {
+    const hasAnyContent = values[r].some(
+      (cell) => String(cell || "").trim() !== "",
+    );
+    if (hasAnyContent) endPeriodRow = r + 1;
+  }
+
+  return {
+    dateRow,
+    startPeriodRow,
+    numPeriodRows: Math.max(1, endPeriodRow - startPeriodRow + 1),
+  };
+}
+
+/**
+ * Interpreta células do PA nos formatos:
+ * - Simplificado ("Turma: 2º Lealdade\nCOMPONENTE CURRICULAR: Física")
+ * - Ultra-curto ("2º LE\nFísica")
+ * - Plano simplificado ("Eletiva: Título...")
+ * - Já preenchido (com MODALIDADE ORGANIZATIVA: contendo conteúdo)
+ */
+function parsePaCellInfo(cellText, runtimeConfig) {
+  if (!cellText) return null;
+  const trimmed = String(cellText).trim();
+  if (!trimmed) return null;
+
+  const modMatch = trimmed.match(
+    /MODALIDADE ORGANIZATIVA:\s*([\s\S]*?)\s*(?:AGRUPAMENTO:|$)/i,
+  );
+  const modContent = modMatch ? modMatch[1].trim() : "";
+  const hasModalidade = modContent.length > 5;
+
+  const turmaMatch = trimmed.match(/Turma:\s*([^\n\r]+)/i);
+  const compMatch = trimmed.match(/COMPONENTE CURRICULAR:\s*([^\n\r]+)/i);
+  if (turmaMatch && compMatch) {
+    const classMeta = resolveClassFromText(turmaMatch[1], runtimeConfig);
+    if (!classMeta) return null;
+    const subjectName = resolveSubjectName(compMatch[1], runtimeConfig);
+    return {
+      className: classMeta.fullName,
+      tabName: classMeta.tab,
+      grade: classMeta.grade,
+      noTv: classMeta.noTv,
+      isSimplified: classMeta.isSimplified,
+      customTitle: null,
+      subject: subjectName,
+      hasModalidade,
+    };
+  }
+
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  const firstLine = lines[0];
+  const colonParts = firstLine.split(":");
+  const candidateClass = resolveClassFromText(colonParts[0], runtimeConfig);
+
+  if (candidateClass) {
+    if (candidateClass.isSimplified) {
+      let customTitle = "";
+      if (colonParts.length > 1) {
+        customTitle = colonParts.slice(1).join(":").trim();
+      } else if (lines.length > 1 && !/^TEMA/i.test(lines[1])) {
+        customTitle = lines[1];
+      }
+      const subjectName = resolveSubjectName(
+        candidateClass.fullName,
+        runtimeConfig,
+      );
+      return {
+        className: candidateClass.fullName,
+        tabName: candidateClass.tab,
+        grade: candidateClass.grade,
+        noTv: candidateClass.noTv,
+        isSimplified: true,
+        customTitle: customTitle || candidateClass.fullName,
+        subject: subjectName,
+        hasModalidade,
+      };
+    }
+
+    if (lines.length >= 2) {
+      const subjectName = resolveSubjectName(lines[1], runtimeConfig);
+      return {
+        className: candidateClass.fullName,
+        tabName: candidateClass.tab,
+        grade: candidateClass.grade,
+        noTv: candidateClass.noTv,
+        isSimplified: candidateClass.isSimplified,
+        customTitle: null,
+        subject: subjectName,
+        hasModalidade,
+      };
+    }
+  }
+
+  return null;
+}
+
+function resolveClassFromText(rawText, runtimeConfig) {
+  const norm = normalizeKey(rawText);
+  if (!norm) return null;
+  if (runtimeConfig.classesByFullName[norm]) {
+    return runtimeConfig.classesByFullName[norm];
+  }
+  if (runtimeConfig.classesByTab[norm]) {
+    return runtimeConfig.classesByTab[norm];
+  }
+
+  for (let i = 0; i < runtimeConfig.classesList.length; i++) {
+    const c = runtimeConfig.classesList[i];
+    if (
+      norm.includes(normalizeKey(c.fullName)) ||
+      norm === normalizeKey(c.tab)
+    ) {
+      return c;
+    }
+  }
+  return null;
+}
+
+function resolveSubjectName(rawSubject, runtimeConfig) {
+  const clean = String(rawSubject || "").trim();
+  const norm = normalizeKey(clean);
+  if (runtimeConfig.subjectsByName[norm]) {
+    return runtimeConfig.subjectsByName[norm].name;
+  }
+  for (let i = 0; i < runtimeConfig.subjectsList.length; i++) {
+    const s = runtimeConfig.subjectsList[i];
+    if (norm.includes(normalizeKey(s.name))) return s.name;
+  }
+  return clean || runtimeConfig.defaultSubject;
+}
 
 function findDraftInClassSheet(
   ss,
   tabName,
   targetSubject,
   targetDateObj,
-  isEletiva,
+  runtimeConfig,
   log,
 ) {
   const sheet = ss.getSheetByName(tabName);
@@ -35,20 +323,12 @@ function findDraftInClassSheet(
   };
 
   for (let r = 0; r < displayData.length; r++) {
-    const firstCell = String(displayData[r][0] || "")
-      .trim()
-      .toLowerCase();
-    if (
-      firstCell.startsWith("conteúdos dados") ||
-      firstCell.startsWith("conteudos dados")
-    ) {
+    const firstCell = normalizeKey(displayData[r][0]);
+    if (firstCell.startsWith("conteudos dados")) {
       headerRowIdx = r;
       for (let c = 0; c < displayData[r].length; c++) {
-        const h = String(displayData[r][c] || "")
-          .trim()
-          .toLowerCase();
-        if (h.includes("conteúdo") || h.includes("conteudo"))
-          colMap.conteudo = c;
+        const h = normalizeKey(displayData[r][c]);
+        if (h.includes("conteudo")) colMap.conteudo = c;
         else if (h.includes("aula")) colMap.aulas = c;
         else if (h.includes("data")) colMap.data = c;
         else if (h.includes("disciplina")) colMap.disciplina = c;
@@ -78,6 +358,7 @@ function findDraftInClassSheet(
     });
   }
 
+  const targetSubjectNorm = normalizeKey(targetSubject);
   const subjectRows = [];
   let ignoredOtherSubjectCount = 0;
 
@@ -100,17 +381,17 @@ function findDraftInClassSheet(
         ? String(displayData[r][colMap.bimestre] || "").trim()
         : "";
 
-    let rowSubject = isEletiva ? "Eletiva" : "Física";
-    if (!isEletiva && colMap.disciplina !== -1) {
+    let rowSubject = targetSubject;
+    if (colMap.disciplina !== -1) {
       const dStr = String(displayData[r][colMap.disciplina] || "").trim();
-      if (/rob[oó]tica/i.test(dStr)) rowSubject = "Robótica";
-      else if (/f[ií]sica/i.test(dStr)) rowSubject = "Física";
-      else if (/eletiva/i.test(dStr)) rowSubject = "Eletiva";
-      else if (dStr === "") rowSubject = "Física";
+      rowSubject =
+        dStr === ""
+          ? runtimeConfig.defaultSubject
+          : resolveSubjectName(dStr, runtimeConfig);
     }
 
     if (!rawSummary && !rawAulas) continue;
-    if (rowSubject.toLowerCase() !== targetSubject.toLowerCase()) {
+    if (normalizeKey(rowSubject) !== targetSubjectNorm) {
       ignoredOtherSubjectCount++;
       continue;
     }
@@ -139,9 +420,7 @@ function findDraftInClassSheet(
       log.warn(
         "Draft_Parser",
         `Nenhuma linha de rascunho encontrada para ${tabName} (${targetSubject})`,
-        {
-          ignoredOtherSubjectCount,
-        },
+        { ignoredOtherSubjectCount },
       );
     }
     return null;
@@ -223,89 +502,21 @@ function findDraftInClassSheet(
     log.warn(
       "Draft_Parser",
       `Sem rascunho compatível para ${tabName} (${targetSubject}) na data ${formatPtShortDate(targetDateObj)}`,
-      {
-        candidateRows: subjectRows.length,
-        lastPastOrCurrentDatedIndex,
-      },
+      { candidateRows: subjectRows.length, lastPastOrCurrentDatedIndex },
     );
   }
 
   return null;
 }
 
-function parsePaCellInfo(cellText) {
-  if (!cellText) return null;
-  const trimmed = cellText.trim();
-
-  if (/^Eletiva\b/i.test(trimmed)) {
-    const lines = trimmed
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    let eletivaTitle = "Experimentos de Física Mão na Massa";
-    if (lines[0].includes(":")) {
-      eletivaTitle = lines[0].split(":")[1].trim() || eletivaTitle;
-    } else if (lines.length > 1 && !lines[1].startsWith("TEMA")) {
-      eletivaTitle = lines[1];
-    }
-
-    const modMatch = trimmed.match(
-      /MODALIDADE ORGANIZATIVA:\s*([\s\S]*?)\s*(?:AGRUPAMENTO:|$)/i,
-    );
-    const modContent = modMatch ? modMatch[1].trim() : "";
-
-    return {
-      className: "Eletiva",
-      tabName: "Eletiva",
-      grade: 0,
-      noTv: false,
-      isEletiva: true,
-      eletivaTitle: eletivaTitle,
-      subject: "Eletiva",
-      hasModalidade: modContent.length > 5,
-    };
-  }
-
-  if (!trimmed.includes("Turma:")) return null;
-
-  const turmaMatch = trimmed.match(/Turma:\s*([^\n\r]+)/i);
-  const compMatch = trimmed.match(/COMPONENTE CURRICULAR:\s*([^\n\r]+)/i);
-  if (!turmaMatch || !compMatch) return null;
-
-  const rawClassName = turmaMatch[1].trim();
-  const rawSubject = compMatch[1].trim();
-
-  let matchedKey = null;
-  Object.keys(CONFIG.CLASS_MAP).forEach((k) => {
-    if (rawClassName.toLowerCase().includes(k.toLowerCase())) matchedKey = k;
-  });
-  if (!matchedKey) return null;
-
-  const classMeta = CONFIG.CLASS_MAP[matchedKey];
-  const modMatch = trimmed.match(
-    /MODALIDADE ORGANIZATIVA:\s*([\s\S]*?)\s*AGRUPAMENTO:/i,
-  );
-  const modContent = modMatch ? modMatch[1].trim() : "";
-
-  return {
-    className: matchedKey,
-    tabName: classMeta.tab,
-    grade: classMeta.grade,
-    noTv: classMeta.noTv,
-    isEletiva: false,
-    subject: /rob[oó]tica/i.test(rawSubject) ? "Robótica" : "Física",
-    hasModalidade: modContent.length > 5,
-  };
-}
-
-function loadEducEspData(ss, log) {
+function loadEducEspData(ss, runtimeConfig, log) {
   const map = {};
-  const sheet = ss.getSheetByName("Educ. Esp.");
+  const sheet = ss.getSheetByName(CONFIG.TABS.EDUC_ESP);
   if (!sheet) {
     if (log)
       log.warn(
         "Educ_Esp_Load",
-        'Aba "Educ. Esp." não encontrada; acessibilidade será N/A para turmas padrão.',
+        `Aba "${CONFIG.TABS.EDUC_ESP}" não encontrada; acessibilidade será N/A.`,
       );
     return map;
   }
@@ -328,19 +539,26 @@ function loadEducEspData(ss, log) {
     allStudents.push(studentObj);
   }
 
-  const eletivaSheet = ss.getSheetByName("Eletiva");
-  if (eletivaSheet && allStudents.length > 0) {
-    const eletivaText = eletivaSheet
-      .getDataRange()
-      .getDisplayValues()
-      .map((r) => String(r[0] || "").toLowerCase())
-      .join("\n");
-    allStudents.forEach((st) => {
-      if (st.cleanName && eletivaText.includes(st.cleanName)) {
-        if (!map["Eletiva"]) map["Eletiva"] = [];
-        map["Eletiva"].push(st);
-      }
-    });
+  if (runtimeConfig && allStudents.length > 0) {
+    runtimeConfig.classesList
+      .filter((c) => c.isSimplified)
+      .forEach((simClass) => {
+        const simSheet = ss.getSheetByName(simClass.tab);
+        if (!simSheet) return;
+        const text = simSheet
+          .getDataRange()
+          .getDisplayValues()
+          .map((r) => String(r[0] || "").toLowerCase())
+          .join("\n");
+        allStudents.forEach((st) => {
+          if (st.cleanName && text.includes(st.cleanName)) {
+            if (!map[simClass.tab]) map[simClass.tab] = [];
+            if (!map[simClass.tab].some((x) => x.cleanName === st.cleanName)) {
+              map[simClass.tab].push(st);
+            }
+          }
+        });
+      });
   }
 
   if (log) {
@@ -355,7 +573,7 @@ function loadEducEspData(ss, log) {
 
 function parseHeaderDate(headerStr) {
   if (!headerStr) return null;
-  const m = headerStr.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  const m = String(headerStr).match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
   if (!m) return null;
   let year = parseInt(m[3], 10);
   if (year < 100) year += 2000;

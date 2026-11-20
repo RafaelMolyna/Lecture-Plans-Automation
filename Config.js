@@ -1,91 +1,25 @@
 /**
  * ============================================================================
- * 1. CONFIG.JS - CONSTANTES GLOBAIS, MENU E CONFIGURAÇÕES (v3.1)
+ * 1. CONFIG.JS - CONSTANTES GLOBAIS, MENU E CONFIGURAÇÕES (v4.0 - UNIVERSAL)
  * ============================================================================
+ * Turmas, salas com/sem TV, disciplinas, pastas do Drive, aulas por PDF,
+ * materiais e critérios usuais são lidos dinamicamente das abas "Turmas" e
+ * "Disciplinas" da planilha.
  */
 
 const CONFIG = {
   DEFAULT_MODEL: "gemini-2.5-flash",
   TIMEZONE: "America/Sao_Paulo",
-  CURRENT_BIMESTRE: "4",
-  BATCH_SIZE: 3, // 3 requisições paralelas reduzem 429/503 no Free Tier
+  CURRENT_BIMESTRE: "4", // Fallback caso a coluna Bimestre esteja vazia
+  BATCH_SIZE: 3, // 3 requisições paralelas reduzem HTTP 429/503 no Free Tier
   RETRY_ATTEMPTS: 2, // Até 2 novas tentativas apenas para itens com HTTP 429 ou 503
 
-  CLASS_MAP: {
-    "1º Honestidade": { tab: "1º HO", grade: 1, noTv: true },
-    "1º Humildade": { tab: "1º HU", grade: 1, noTv: false },
-    "2º Lealdade": { tab: "2º LE", grade: 2, noTv: true },
-    "2º Solidariedade": { tab: "2º SO", grade: 2, noTv: false },
-    "3º Altruísmo": { tab: "3º AL", grade: 3, noTv: false },
-    "3º Resiliência": { tab: "3º RE", grade: 3, noTv: true },
-    Eletiva: { tab: "Eletiva", grade: 0, noTv: false, isEletiva: true },
-  },
-
-  TAB_TO_FULLNAME: {
-    "1º HO": "1º Honestidade",
-    "1º HU": "1º Humildade",
-    "2º LE": "2º Lealdade",
-    "2º SO": "2º Solidariedade",
-    "3º AL": "3º Altruísmo",
-    "3º RE": "3º Resiliência",
-    Eletiva: "Eletiva",
-  },
-
-  SUBJECT_FOLDER_NAMES: {
-    Física_1: "Física 1",
-    Física_2: "Física 2",
-    Física_3: "Física 3",
-    Robótica_1: "Robótica 1",
-    Robótica_2: "Robótica 2",
-    Robótica_3: "Robótica 2",
-  },
-
-  MASTER_MATERIALS: {
-    Física: [
-      "Quadro Branco",
-      "Marcadores para quadro branco",
-      "Livro do Estudante (SEDUC)",
-      "Caderno do Estudante",
-      "Material Impresso / Lista de Exercícios",
-      "Simulador PhET Colorado",
-      "Dispositivos eletrônicos / Smartphones",
-      "Carrinhos de dinâmica",
-      "Massas aferidas / Blocos",
-      "Polias e barbante",
-      "Bolinhas de borracha / gude",
-      "Massinha de modelar",
-      "Corda e Mola (Slinky)",
-      "Ímãs de neodímio",
-      "Bússola",
-      "Fio condutor e Fonte de tensão / Bateria",
-      "Resistores de carbono/grafite",
-    ],
-    Robótica: [
-      "Quadro Branco",
-      "Cadernos, lápis, borracha e canetas",
-      "Kits de Robótica",
-      "Placa BBC micro:bit V2",
-      "Shield Robotbit com bateria",
-      "Servomotores e Motores DC",
-      "Cabos USB",
-      "Plataforma Microsoft MakeCode",
-      "Teachable Machine / CreateAI",
-      "Papelão e Gabaritos impressos",
-      "Estiletes e Tesouras sem ponta",
-      "Réguas",
-      "Cola quente e Cola branca",
-      "Varetas de churrasco / Palitos",
-      "Chaves Philips / Fenda e Parafusos",
-      "Lixas (180/220)",
-    ],
-    Eletiva: [
-      "Quadro Branco",
-      "Bancadas de laboratório",
-      "Roteiro experimental impresso",
-      "Caderno, lápis e caneta",
-      "Materiais de baixo custo para experimentos mão na massa",
-      "Carrinhos, polias, massas, elásticos, ímãs, fontes de tensão, ferramentas manuais",
-    ],
+  TABS: {
+    TURMAS: "Turmas",
+    DISCIPLINAS: "Disciplinas",
+    EDUC_ESP: "Educ. Esp.",
+    PA_BASE: "PA (Base)",
+    PA_ATUAL: "PA (Atual)",
   },
 };
 
@@ -173,7 +107,7 @@ function setupCredentialsDialog() {
   const currentAulasUrl = props.getProperty("AULAS_FOLDER_ID") || "";
   const respAulas = ui.prompt(
     '📁 Pasta "Aulas" no Google Drive',
-    'Cole o link ou ID da pasta principal "Aulas" (Física 1, 2, 3 e Robótica 1, 2):\n' +
+    'Cole o link ou ID da pasta principal que contém as subpastas configuradas na aba "Disciplinas":\n' +
       (currentAulasUrl
         ? `(Atual: ${currentAulasUrl} - deixe em branco para manter)`
         : ""),
@@ -212,7 +146,6 @@ function setupCredentialsDialog() {
 }
 
 function extractDriveId(urlOrId) {
-  const match = urlOrId.match(/[-\w]{25,}/);
-  return match ? match[0] : urlOrId.trim();
-  s;
+  const match = String(urlOrId || "").match(/[-\w]{25,}/);
+  return match ? match[0] : String(urlOrId || "").trim();
 }

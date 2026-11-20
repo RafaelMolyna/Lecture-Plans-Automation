@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * 2. MAIN.JS - ORQUESTRADOR PARALELO, SELETOR DE SEMANA E PROGRESSO (v3.2)
+ * 2. MAIN.JS - ORQUESTRADOR PARALELO UNIVERSAL, PROGRESSO E RETRY (v4.0)
  * ============================================================================
  */
 
@@ -17,12 +17,15 @@ function applyPreparedWeek(isoDateStr) {
 
   try {
     log.timeStart("Prepare_Week_Sheet");
-    const baseSheet = ss.getSheetByName("PA (Base)");
-    let atualSheet = ss.getSheetByName("PA (Atual)");
+    const baseSheet = ss.getSheetByName(CONFIG.TABS.PA_BASE);
+    let atualSheet = ss.getSheetByName(CONFIG.TABS.PA_ATUAL);
 
     if (!baseSheet) {
-      log.error("Prepare_Week_Sheet", 'Aba "PA (Base)" não encontrada.');
-      throw new Error('Aba "PA (Base)" não encontrada.');
+      log.error(
+        "Prepare_Week_Sheet",
+        `Aba "${CONFIG.TABS.PA_BASE}" não encontrada.`,
+      );
+      throw new Error(`Aba "${CONFIG.TABS.PA_BASE}" não encontrada.`);
     }
 
     const parts = String(isoDateStr || "").split("-");
@@ -43,7 +46,6 @@ function applyPreparedWeek(isoDateStr) {
       0,
       0,
     );
-
     if (isNaN(monday.getTime())) {
       log.error("Prepare_Week_Sheet", "Data inválida após parsing", {
         isoDateStr,
@@ -52,36 +54,41 @@ function applyPreparedWeek(isoDateStr) {
     }
 
     if (!atualSheet) {
-      atualSheet = baseSheet.copyTo(ss).setName("PA (Atual)");
+      atualSheet = baseSheet.copyTo(ss).setName(CONFIG.TABS.PA_ATUAL);
       log.info(
         "Prepare_Week_Sheet",
-        'Aba "PA (Atual)" criada a partir de "PA (Base)".',
+        `Aba "${CONFIG.TABS.PA_ATUAL}" criada a partir de "${CONFIG.TABS.PA_BASE}".`,
       );
     } else {
       atualSheet.clear();
       baseSheet.getDataRange().copyTo(atualSheet.getRange(1, 1));
       log.info(
         "Prepare_Week_Sheet",
-        'Aba "PA (Atual)" resetada a partir de "PA (Base)".',
+        `Aba "${CONFIG.TABS.PA_ATUAL}" resetada a partir de "${CONFIG.TABS.PA_BASE}".`,
       );
     }
 
+    const layout = detectPaGridLayout(atualSheet);
     const dayNames = ["SEG", "TER", "QUA", "QUI", "SEX"];
     const oneDayMs = 24 * 60 * 60 * 1000;
     const updatedHeaders = [];
+
     for (let i = 0; i < 5; i++) {
       const d = new Date(monday.getTime() + i * oneDayMs);
       const formatted = Utilities.formatDate(d, CONFIG.TIMEZONE, "dd/MM/yy");
       const label = `${formatted}\n${dayNames[i]}`;
-      atualSheet.getRange(4, 2 + i).setValue(label);
+      atualSheet.getRange(layout.dateRow, 2 + i).setValue(label);
       updatedHeaders.push(label.replace("\n", " "));
     }
 
     ss.setActiveSheet(atualSheet);
-    log.timeEnd("Prepare_Week_Sheet", { headers: updatedHeaders });
+    log.timeEnd("Prepare_Week_Sheet", {
+      dateRow: layout.dateRow,
+      headers: updatedHeaders,
+    });
     log.checkpoint("WEEK_PREPARED", { monday: isoDateStr });
     ss.toast(
-      `Semana de ${parts[2]}/${parts[1]}/${parts[0]} preparada em "PA (Atual)"!`,
+      `Semana de ${parts[2]}/${parts[1]}/${parts[0]} preparada em "${CONFIG.TABS.PA_ATUAL}"!`,
       "✅ Concluído",
       5,
     );
@@ -100,22 +107,23 @@ function generateAllWeekPlans() {
 }
 
 function generatePlanForActiveTab() {
-  const activeTabName = SpreadsheetApp.getActiveSpreadsheet()
-    .getActiveSheet()
-    .getName();
-  if (!CONFIG.TAB_TO_FULLNAME[activeTabName]) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const activeTabName = ss.getActiveSheet().getName();
+  const runtimeConfig = loadRuntimeConfig(ss, null);
+
+  if (!runtimeConfig.classesByTab[normalizeKey(activeTabName)]) {
+    const validTabs = runtimeConfig.classesList
+      .map((c) => `"${c.tab}"`)
+      .join(", ");
     SpreadsheetApp.getUi().alert(
       `⚠️ Você está na aba "${activeTabName}".\n\n` +
-        `Entre primeiro na aba de uma turma (ex: "1º HO", "2º LE", "3º AL" ou "Eletiva").`,
+        `Entre primeiro na aba de uma turma cadastrada em "${CONFIG.TABS.TURMAS}": ${validTabs}.`,
     );
     return;
   }
   runPlanGeneration(activeTabName);
 }
 
-/**
- * Grava o estado atual da barra de progresso no CacheService (lido pelo ProgressSidebar.html).
- */
 function updateProgressState(percent, stage, detail, success, errors, done) {
   const payload = JSON.stringify({
     percent: Math.min(100, Math.max(0, Math.round(percent))),
@@ -160,18 +168,20 @@ function runPlanGeneration(filterTabName) {
       return;
     }
 
-    const paSheet = ss.getSheetByName("PA (Atual)");
+    const paSheet = ss.getSheetByName(CONFIG.TABS.PA_ATUAL);
     if (!paSheet) {
-      log.error("SHEET_LOOKUP", 'Aba "PA (Atual)" não encontrada na planilha.');
-      ui.alert('❌ Aba "PA (Atual)" não encontrada.');
+      log.error(
+        "SHEET_LOOKUP",
+        `Aba "${CONFIG.TABS.PA_ATUAL}" não encontrada na planilha.`,
+      );
+      ui.alert(`❌ Aba "${CONFIG.TABS.PA_ATUAL}" não encontrada.`);
       return;
     }
 
-    // Abre o painel de progresso (troque por ui.showModelessDialog se preferir janela flutuante)
     updateProgressState(
       5,
-      "1/4 • Varrendo PA (Atual)",
-      "Identificando aulas pendentes da semana...",
+      "1/4 • Carregando Configs e PA",
+      "Lendo abas Turmas, Disciplinas e PA (Atual)...",
       0,
       0,
       false,
@@ -182,14 +192,17 @@ function runPlanGeneration(filterTabName) {
       ),
     );
 
-    // ------------------------------------------------------------------------
-    // ETAPA 1: VARREDURA DO PA (ATUAL) E AGRUPAMENTO DE DOBRADINHAS
-    // ------------------------------------------------------------------------
-    log.timeStart("Scan_PA_Atual", { sheet: "PA (Atual)" });
-    const headerRange = paSheet.getRange(4, 2, 1, 5).getDisplayValues()[0];
+    const runtimeConfig = loadRuntimeConfig(ss, log);
+
+    log.timeStart("Scan_PA_Atual", { sheet: CONFIG.TABS.PA_ATUAL });
+    const layout = detectPaGridLayout(paSheet);
+    const headerRange = paSheet
+      .getRange(layout.dateRow, 2, 1, 5)
+      .getDisplayValues()[0];
     const colDates = headerRange.map((text) => parseHeaderDate(text));
-    const gridRange = paSheet.getRange(5, 2, 8, 5);
-    const gridValues = gridRange.getDisplayValues();
+    const gridValues = paSheet
+      .getRange(layout.startPeriodRow, 2, layout.numPeriodRows, 5)
+      .getDisplayValues();
 
     let skippedFilledCount = 0;
     let ignoredNonLessonCells = 0;
@@ -207,9 +220,9 @@ function runPlanGeneration(filterTabName) {
       }
 
       let row = 0;
-      while (row < 8) {
+      while (row < layout.numPeriodRows) {
         const cellText = gridValues[row][col];
-        const slotInfo = parsePaCellInfo(cellText);
+        const slotInfo = parsePaCellInfo(cellText, runtimeConfig);
 
         if (!slotInfo) {
           ignoredNonLessonCells++;
@@ -217,24 +230,26 @@ function runPlanGeneration(filterTabName) {
           continue;
         }
 
-        if (filterTabName && slotInfo.tabName !== filterTabName) {
-          log.info("Scan_PA_Atual", `Célula ignorada por filtro de aba ativa`, {
-            cell: `R${row + 5}C${col + 2}`,
-            slotTab: slotInfo.tabName,
-            filterTabName,
-          });
+        if (
+          filterTabName &&
+          normalizeKey(slotInfo.tabName) !== normalizeKey(filterTabName)
+        ) {
           row++;
           continue;
         }
 
         let isDouble = false;
         let secondCellInfo = null;
-        if (row + 1 < 8) {
-          const nextSlotInfo = parsePaCellInfo(gridValues[row + 1][col]);
+        if (row + 1 < layout.numPeriodRows) {
+          const nextSlotInfo = parsePaCellInfo(
+            gridValues[row + 1][col],
+            runtimeConfig,
+          );
           if (
             nextSlotInfo &&
             nextSlotInfo.className === slotInfo.className &&
-            nextSlotInfo.subject === slotInfo.subject
+            normalizeKey(nextSlotInfo.subject) ===
+              normalizeKey(slotInfo.subject)
           ) {
             isDouble = true;
             secondCellInfo = nextSlotInfo;
@@ -248,25 +263,20 @@ function runPlanGeneration(filterTabName) {
 
         if (firstAlreadyFilled && secondAlreadyFilled) {
           skippedFilledCount++;
-          log.info(
-            "Scan_PA_Atual",
-            `Bloco já preenchido (MODALIDADE ORGANIZATIVA existente), ignorado`,
-            {
-              tab: slotInfo.tabName,
-              subject: slotInfo.subject,
-              date: formatPtShortDate(dayDate),
-              isDouble,
-            },
-          );
+          log.info("Scan_PA_Atual", "Bloco já preenchido, ignorado", {
+            tab: slotInfo.tabName,
+            subject: slotInfo.subject,
+            date: formatPtShortDate(dayDate),
+            isDouble,
+          });
         } else {
           blocks.push({
             colIndex: col + 2,
-            row1: row + 5,
-            row2: isDouble ? row + 6 : null,
+            row1: layout.startPeriodRow + row,
+            row2: isDouble ? layout.startPeriodRow + row + 1 : null,
             isDouble: isDouble,
-            isEletiva: Boolean(slotInfo.isEletiva),
-            eletivaTitle:
-              slotInfo.eletivaTitle || "Experimentos de Física Mão na Massa",
+            isSimplified: slotInfo.isSimplified,
+            customTitle: slotInfo.customTitle,
             dateObj: dayDate,
             dateStr: Utilities.formatDate(
               dayDate,
@@ -287,6 +297,8 @@ function runPlanGeneration(filterTabName) {
     }
 
     log.timeEnd("Scan_PA_Atual", {
+      dateRow: layout.dateRow,
+      periodRows: layout.numPeriodRows,
       pendingBlocks: blocks.length,
       skippedFilledCount,
       ignoredNonLessonCells,
@@ -312,9 +324,6 @@ function runPlanGeneration(filterTabName) {
       return;
     }
 
-    // ------------------------------------------------------------------------
-    // ETAPA 2: BUSCA DE RASCUNHOS NAS ABAS DAS TURMAS
-    // ------------------------------------------------------------------------
     log.timeStart("Draft_Matching", { blockCount: blocks.length });
     const missingDrafts = [];
     const readyBlocks = [];
@@ -325,7 +334,7 @@ function runPlanGeneration(filterTabName) {
         block.tabName,
         block.subject,
         block.dateObj,
-        block.isEletiva,
+        runtimeConfig,
         log,
       );
       if (!draft || (!draft.summary && !draft.aulas)) {
@@ -395,11 +404,8 @@ function runPlanGeneration(filterTabName) {
       return;
     }
 
-    // ------------------------------------------------------------------------
-    // ETAPA 3: LEITURA DE EDUC. ESP., GUIA PRIORIZADO E PDFs DO DRIVE (CACHE)
-    // ------------------------------------------------------------------------
     log.timeStart("Load_EducEsp_And_Guia");
-    const educEspMap = loadEducEspData(ss, log);
+    const educEspMap = loadEducEspData(ss, runtimeConfig, log);
     const guiaSummary = getPrioritizedCurriculumText(apiKey, log);
     log.timeEnd("Load_EducEsp_And_Guia");
 
@@ -429,6 +435,12 @@ function runPlanGeneration(filterTabName) {
       );
 
       const studentsEsp = educEspMap[block.tabName] || [];
+      const subjectMeta = getSubjectMeta(
+        runtimeConfig,
+        block.subject,
+        block.grade,
+      );
+
       log.info(
         "Educ_Esp_Eval",
         `Acessibilidade avaliada para ${block.tabName} (${block.subject})`,
@@ -438,13 +450,17 @@ function runPlanGeneration(filterTabName) {
         },
       );
 
-      const encodedPdfs = block.isEletiva
-        ? []
-        : resolveLecturePdfsCached(block, pdfBase64Cache, log);
+      const encodedPdfs = resolveLecturePdfsCached(
+        block,
+        subjectMeta,
+        pdfBase64Cache,
+        log,
+      );
       const requestObj = buildGeminiRequestPayload({
         apiKey: apiKey,
         modelName: modelName,
         block: block,
+        subjectMeta: subjectMeta,
         studentsEsp: studentsEsp,
         encodedPdfs: encodedPdfs,
         guiaSummary: guiaSummary,
@@ -456,9 +472,6 @@ function runPlanGeneration(filterTabName) {
       cachedPdfKeys: Object.keys(pdfBase64Cache).length,
     });
 
-    // ------------------------------------------------------------------------
-    // ETAPA 4: EXECUÇÃO PARALELA EM LOTES COM RETRY PARA HTTP 429 / 503
-    // ------------------------------------------------------------------------
     function processItemsInBatches(items, labelPrefix) {
       const retryQueue = [];
       const batchesCount = Math.ceil(items.length / CONFIG.BATCH_SIZE);
@@ -605,7 +618,6 @@ function runPlanGeneration(filterTabName) {
       pendingRetry = processItemsInBatches(itemsToRetry, `Retry_${attempt}`);
     }
 
-    // Contabiliza falhas definitivas após esgotar todas as tentativas de retry
     pendingRetry.forEach((r) => {
       errorCount++;
       log.error(
@@ -617,10 +629,7 @@ function runPlanGeneration(filterTabName) {
     log.timeStart("Spreadsheet_Flush");
     SpreadsheetApp.flush();
     log.timeEnd("Spreadsheet_Flush");
-    log.checkpoint("COMPLETED", {
-      successCount: successCount,
-      errorCount: errorCount,
-    });
+    log.checkpoint("COMPLETED", { successCount, errorCount });
 
     updateProgressState(
       100,
@@ -656,7 +665,9 @@ function runPlanGeneration(filterTabName) {
       "UNHANDLED_CRASH",
       `Crash na etapa "${log.lastCheckpoint}"`,
       err,
-      { filterTabName: filterTabName || "ALL" },
+      {
+        filterTabName: filterTabName || "ALL",
+      },
     );
     ui.alert(
       `❌ Erro crítico na etapa "${log.lastCheckpoint}": ${err.message}\n\n` +

@@ -1,10 +1,10 @@
 /**
  * ============================================================================
- * 4. DRIVESERVICE.GS - CACHE BASE64 DE PDFs, BIMESTRE E REGRA 2X1 ROBÓTICA
+ * 4. DRIVESERVICE.JS - CACHE BASE64, BIMESTRE, PASTA DINÂMICA E AULAS/PDF
  * ============================================================================
  */
 
-function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
+function resolveLecturePdfsCached(block, subjectMeta, pdfBase64Cache, log) {
   const results = [];
   const combinedText = `${block.draft.summary}\n${(block.draft.links || []).join("\n")}`;
 
@@ -73,7 +73,11 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
       }
     } catch (e) {
       if (log)
-        log.warn(`Falha ao baixar PDF de URL direta (${url})`, e.message);
+        log.warn(
+          "PDF_Resolver",
+          `Falha ao baixar PDF de URL direta (${url})`,
+          e.message,
+        );
     }
   });
 
@@ -86,6 +90,17 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
     return results;
   }
 
+  const targetFolderName = subjectMeta ? subjectMeta.driveFolder : null;
+  if (!targetFolderName) {
+    if (log) {
+      log.info(
+        "PDF_Resolver",
+        `Disciplina "${block.subject}" (Série ${block.grade}) sem pasta no Drive configurada; prosseguindo sem PDF.`,
+      );
+    }
+    return results;
+  }
+
   const targetBimestre = detectTargetBimestre(
     block.draft.bimestre,
     block.draft.aulas,
@@ -95,12 +110,15 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
     block.draft.aulas,
     block.draft.summary,
   );
+  const lessonsPerPdf = (subjectMeta && subjectMeta.lessonsPerPdf) || 1;
 
   if (log) {
     log.info(
       "PDF_Resolver",
       `Parâmetros de busca para ${block.tabName} (${block.subject})`,
       {
+        folder: targetFolderName,
+        lessonsPerPdf,
         targetBimestre,
         aulasCol: block.draft.aulas || "(vazio)",
         parsedRequests,
@@ -129,17 +147,6 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
   }
 
   try {
-    const subjectKey = `${block.subject}_${block.grade}`;
-    const targetFolderName = CONFIG.SUBJECT_FOLDER_NAMES[subjectKey];
-    if (!targetFolderName) {
-      if (log)
-        log.warn(
-          "PDF_Resolver",
-          `Sem mapeamento de pasta para chave "${subjectKey}"`,
-        );
-      return results;
-    }
-
     const subjectFolder = findSubfolderByName(
       DriveApp.getFolderById(rootAulasFolderId),
       targetFolderName,
@@ -158,9 +165,7 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
       log.info(
         "PDF_Resolver",
         `Candidatos encontrados em "${targetFolderName}" (Bim ${targetBimestre})`,
-        {
-          candidateCount: candidatePdfs.length,
-        },
+        { candidateCount: candidatePdfs.length },
       );
     }
 
@@ -170,7 +175,7 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
       const match = findBestMatchingPdf(
         candidatePdfs,
         req,
-        block.subject,
+        lessonsPerPdf,
         targetBimestre,
       );
       if (match) {
@@ -199,9 +204,7 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
             log.info(
               "PDF_Cache",
               `PDF reutilizado do cache em memória: ${match.getName()}`,
-              {
-                reqNum: req.num,
-              },
+              { reqNum: req.num },
             );
           }
           results.push(pdfBase64Cache[fileId]);
@@ -214,6 +217,7 @@ function resolveLecturePdfsCached(block, pdfBase64Cache, log) {
             bimestre: targetBimestre,
             reqNum: req.num,
             isDirectPdf: req.isDirectPdf,
+            lessonsPerPdf,
           },
         );
       }
@@ -291,10 +295,11 @@ function extractAulaRequests(aulasColText, summaryFallbackText) {
     });
 }
 
-function findBestMatchingPdf(pdfFiles, req, subject, targetBimestre) {
-  const isRobotics = /rob[oó]tica/i.test(subject);
+function findBestMatchingPdf(pdfFiles, req, lessonsPerPdf, targetBimestre) {
+  const perPdf = Math.max(1, lessonsPerPdf || 1);
+  const isMultiLesson = perPdf > 1;
   const targetNum =
-    isRobotics && !req.isDirectPdf ? Math.ceil(req.num / 2) : req.num;
+    isMultiLesson && !req.isDirectPdf ? Math.ceil(req.num / perPdf) : req.num;
 
   const bimFiltered = pdfFiles.filter(function (file) {
     const name = file.getName();
@@ -311,11 +316,11 @@ function findBestMatchingPdf(pdfFiles, req, subject, targetBimestre) {
     const file = pool[i];
     const name = file.getName();
 
-    if (isRobotics) {
-      const pairFirst = targetNum * 2 - 1;
-      const pairSecond = targetNum * 2;
+    if (isMultiLesson) {
+      const rangeFirst = (targetNum - 1) * perPdf + 1;
+      const rangeLast = targetNum * perPdf;
       const explicitPairRegex = new RegExp(
-        `Aulas?\\s*0?${pairFirst}\\s*(?:e|a|-)\\s*0?${pairSecond}\\b`,
+        `Aulas?\\s*0?${rangeFirst}\\s*(?:e|a|-)\\s*0?${rangeLast}\\b`,
         "i",
       );
       const pdfIndexRegex = new RegExp(
@@ -327,8 +332,8 @@ function findBestMatchingPdf(pdfFiles, req, subject, targetBimestre) {
         return file;
       }
     } else {
-      const physicsRegex = new RegExp(`Aula\\s*0?${targetNum}\\b`, "i");
-      if (physicsRegex.test(name)) {
+      const singleRegex = new RegExp(`Aula\\s*0?${targetNum}\\b`, "i");
+      if (singleRegex.test(name)) {
         return file;
       }
     }
@@ -355,6 +360,7 @@ function collectPdfsForBimestre(subjectFolder, targetBimestre) {
 
 function standardizeDrivePdfNames() {
   const log = new ExecutionLogger("Padronizar Nomes de PDFs no Drive");
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
   const props = PropertiesService.getScriptProperties();
   const rootId = props.getProperty("AULAS_FOLDER_ID");
@@ -368,12 +374,18 @@ function standardizeDrivePdfNames() {
       return;
     }
 
+    const runtimeConfig = loadRuntimeConfig(ss, log);
+    const uniqueFolders = {};
+    runtimeConfig.subjectsList.forEach((s) => {
+      if (s.driveFolder && !uniqueFolders[s.driveFolder]) {
+        uniqueFolders[s.driveFolder] = s.lessonsPerPdf;
+      }
+    });
+
+    const folderNames = Object.keys(uniqueFolders);
     const confirm = ui.alert(
       "🗂️ Padronizar Nomes dos PDFs no Drive",
-      "Esta função irá organizar os nomes dos PDFs nas pastas de Física e Robótica para:\n\n" +
-        "• Física: [Física 1 - 4º Bim] Aula 04 - Título.pdf\n" +
-        "• Robótica: [Robótica 1 - 4º Bim] PDF 03 (Aulas 05 e 06) - Título.pdf\n\n" +
-        "Deseja continuar?",
+      `Esta função irá organizar os nomes dos PDFs nas pastas configuradas em "Disciplinas":\n${folderNames.join(", ")}\n\nDeseja continuar?`,
       ui.ButtonSet.YES_NO,
     );
     if (confirm !== ui.Button.YES) {
@@ -383,22 +395,15 @@ function standardizeDrivePdfNames() {
 
     log.timeStart("Rename_Drive_Pdfs");
     const rootFolder = DriveApp.getFolderById(rootId);
-    const subFolders = [
-      "Física 1",
-      "Física 2",
-      "Física 3",
-      "Robótica 1",
-      "Robótica 2",
-    ];
     let renamedCount = 0;
 
-    subFolders.forEach((folderName) => {
+    folderNames.forEach((folderName) => {
       const folder = findSubfolderByName(rootFolder, folderName);
       if (!folder) {
         log.warn("PDF_Rename", `Subpasta não encontrada: ${folderName}`);
         return;
       }
-      const isRobotics = folderName.toLowerCase().includes("robótica");
+      const perPdf = uniqueFolders[folderName] || 1;
       const files = collectPdfsForBimestre(folder, null);
 
       files.forEach((file) => {
@@ -417,16 +422,14 @@ function standardizeDrivePdfNames() {
 
         let cleanTopic = oldName
           .replace(/\.pdf$/i, "")
-          .replace(/F[ií]sica\s*\d\s*[-,]?\s*/gi, "")
-          .replace(/Rob[oó]t\.?\s*[-,]?\s*/gi, "")
           .replace(/\d[ºo°]?\s*Bim(?:estre)?\s*[-,]?\s*/gi, "")
           .replace(/Aula\s*0?\d{1,2}\s*[-,]?\s*/gi, "")
           .trim();
 
         let newName = "";
-        if (isRobotics) {
-          const a1 = num * 2 - 1;
-          const a2 = num * 2;
+        if (perPdf > 1) {
+          const a1 = (num - 1) * perPdf + 1;
+          const a2 = num * perPdf;
           const p1 = a1 < 10 ? `0${a1}` : `${a1}`;
           const p2 = a2 < 10 ? `0${a2}` : `${a2}`;
           newName = `[${folderName} - ${bim}] PDF ${padNum} (Aulas ${p1} e ${p2}) - ${cleanTopic}.pdf`;
@@ -473,7 +476,7 @@ function getPrioritizedCurriculumText(apiKey, log) {
 
     while (files.hasNext()) {
       const f = files.next();
-      if (/guia.*curr[ií]culo.*priorizado/i.test(f.getName())) {
+      if (/guia.*c[uú]rr[ií]culo.*priorizado/i.test(f.getName())) {
         if (!targetFile || f.getLastUpdated() > targetFile.getLastUpdated()) {
           targetFile = f;
         }
@@ -514,8 +517,8 @@ function getPrioritizedCurriculumText(apiKey, log) {
       );
     const blob = targetFile.getBlob();
     const prompt =
-      "Extraia deste Guia do Currículo Priorizado de Física todas as habilidades (códigos EM13CNT... e Aprendizagens Essenciais AE...) " +
-      "organizadas por Série (1ª, 2ª e 3ª série), Bimestre e Tema. Seja conciso e liste todos os códigos e suas descrições oficiais em português.";
+      "Extraia deste Guia do Currículo Priorizado todas as habilidades (códigos EM13... e Aprendizagens Essenciais AE...) " +
+      "organizadas por Série, Bimestre e Tema. Seja conciso e liste todos os códigos e suas descrições oficiais em português.";
 
     const extractedCatalog = callGeminiTextOnlyWithPdf(apiKey, prompt, blob);
     if (extractedCatalog && extractedCatalog.length > 50) {
