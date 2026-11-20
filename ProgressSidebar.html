@@ -1,0 +1,120 @@
+<!doctype html>
+<html>
+  <head>
+    <base target="_top" />
+    <style>
+      body {
+        font-family: "Google Sans", Roboto, Arial, sans-serif;
+        padding: 16px;
+        margin: 0;
+        color: #202124;
+        background: #fafafa;
+      }
+      .card {
+        background: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        padding: 16px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+      }
+      .header {
+        font-size: 15px;
+        font-weight: 600;
+        margin-bottom: 4px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .pct {
+        font-size: 18px;
+        font-weight: 700;
+        color: #1a73e8;
+      }
+      .bar-bg {
+        width: 100%;
+        height: 10px;
+        background: #e8eaed;
+        border-radius: 999px;
+        overflow: hidden;
+        margin: 12px 0;
+      }
+      .bar-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #1a73e8, #34a853);
+        transition: width 0.4s ease;
+      }
+      .stage {
+        font-size: 13px;
+        font-weight: 600;
+        color: #3c4043;
+        margin-bottom: 6px;
+      }
+      .detail {
+        font-size: 12px;
+        color: #5f6368;
+        line-height: 1.4;
+        min-height: 34px;
+      }
+      .stats {
+        margin-top: 14px;
+        padding-top: 10px;
+        border-top: 1px solid #f1f3f4;
+        font-size: 12px;
+        color: #5f6368;
+        display: flex;
+        justify-content: space-between;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="header">
+        <span id="title">🤖 Gerando Planos</span>
+        <span class="pct" id="pct">0%</span>
+      </div>
+      <div class="bar-bg">
+        <div class="bar-fill" id="bar"></div>
+      </div>
+      <div class="stage" id="stage">Inicializando...</div>
+      <div class="detail" id="detail">Preparando leitura da planilha...</div>
+      <div class="stats">
+        <span id="counts">✅ 0 | ⚠️ 0</span>
+        <span id="timer">0s</span>
+      </div>
+    </div>
+
+    <script>
+      const startTime = Date.now();
+      setInterval(() => {
+        const sec = Math.floor((Date.now() - startTime) / 1000);
+        document.getElementById("timer").textContent = sec + "s";
+      }, 1000);
+
+      function pollStatus() {
+        google.script.run
+          .withSuccessHandler((state) => {
+            if (!state) return;
+            document.getElementById("pct").textContent = state.percent + "%";
+            document.getElementById("bar").style.width = state.percent + "%";
+            document.getElementById("stage").textContent = state.stage;
+            document.getElementById("detail").textContent = state.detail;
+            document.getElementById("counts").textContent =
+              `✅ ${state.success} | ❌ ${state.errors}`;
+
+            if (state.done) {
+              document.getElementById("title").textContent =
+                state.errors > 0 ? "⚠️ Finalizado" : "🎉 Concluído!";
+              setTimeout(() => google.script.host.close(), 3500);
+            } else {
+              setTimeout(pollStatus, 1500);
+            }
+          })
+          .withFailureHandler(() => setTimeout(pollStatus, 2000))
+          .getGenerationProgressState();
+      }
+
+      pollStatus();
+    </script>
+  </body>
+</html>

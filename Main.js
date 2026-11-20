@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * 2. MAIN.JS - ORQUESTRADOR PARALELO, SELETOR DE SEMANA E LOGS (v3.1)
+ * 2. MAIN.JS - ORQUESTRADOR PARALELO, SELETOR DE SEMANA E PROGRESSO (v3.2)
  * ============================================================================
  */
 
@@ -8,7 +8,7 @@ function openWeekPickerDialog() {
   const html = HtmlService.createHtmlOutputFromFile("WeekPicker")
     .setWidth(420)
     .setHeight(240);
-  SpreadsheetApp.getUi().showModalDialog(html, "📅 Preparar Nova Semana");
+  SpreadsheetApp.getUi().showModelessDialog(html, "📅 Preparar Nova Semana");
 }
 
 function applyPreparedWeek(isoDateStr) {
@@ -113,6 +113,26 @@ function generatePlanForActiveTab() {
   runPlanGeneration(activeTabName);
 }
 
+/**
+ * Grava o estado atual da barra de progresso no CacheService (lido pelo ProgressSidebar.html).
+ */
+function updateProgressState(percent, stage, detail, success, errors, done) {
+  const payload = JSON.stringify({
+    percent: Math.min(100, Math.max(0, Math.round(percent))),
+    stage: stage || "",
+    detail: detail || "",
+    success: success || 0,
+    errors: errors || 0,
+    done: Boolean(done),
+  });
+  CacheService.getScriptCache().put("PEI_PROGRESS_STATE", payload, 600);
+}
+
+function getGenerationProgressState() {
+  const raw = CacheService.getScriptCache().get("PEI_PROGRESS_STATE");
+  return raw ? JSON.parse(raw) : null;
+}
+
 function runPlanGeneration(filterTabName) {
   const opLabel = filterTabName
     ? `Gerar Plano (${filterTabName})`
@@ -124,6 +144,9 @@ function runPlanGeneration(filterTabName) {
   const ui = SpreadsheetApp.getUi();
   const props = PropertiesService.getScriptProperties();
   const apiKey = props.getProperty("GEMINI_API_KEY");
+
+  let successCount = 0;
+  let errorCount = 0;
 
   try {
     if (!apiKey) {
@@ -144,6 +167,24 @@ function runPlanGeneration(filterTabName) {
       return;
     }
 
+    // Abre o painel de progresso (troque por ui.showModelessDialog se preferir janela flutuante)
+    updateProgressState(
+      5,
+      "1/4 • Varrendo PA (Atual)",
+      "Identificando aulas pendentes da semana...",
+      0,
+      0,
+      false,
+    );
+    ui.showSidebar(
+      HtmlService.createHtmlOutputFromFile("ProgressSidebar").setTitle(
+        "Progresso - Planos PEI",
+      ),
+    );
+
+    // ------------------------------------------------------------------------
+    // ETAPA 1: VARREDURA DO PA (ATUAL) E AGRUPAMENTO DE DOBRADINHAS
+    // ------------------------------------------------------------------------
     log.timeStart("Scan_PA_Atual", { sheet: "PA (Atual)" });
     const headerRange = paSheet.getRange(4, 2, 1, 5).getDisplayValues()[0];
     const colDates = headerRange.map((text) => parseHeaderDate(text));
@@ -256,6 +297,14 @@ function runPlanGeneration(filterTabName) {
     });
 
     if (blocks.length === 0) {
+      updateProgressState(
+        100,
+        "Tudo pronto!",
+        "Todos os planos aplicáveis já estavam preenchidos.",
+        0,
+        0,
+        true,
+      );
       log.info("RUN_END", "Nenhum bloco pendente encontrado em PA (Atual).");
       ui.alert(
         "ℹ️ Todos os planos aplicáveis já possuem a MODALIDADE ORGANIZATIVA preenchida!",
@@ -263,6 +312,9 @@ function runPlanGeneration(filterTabName) {
       return;
     }
 
+    // ------------------------------------------------------------------------
+    // ETAPA 2: BUSCA DE RASCUNHOS NAS ABAS DAS TURMAS
+    // ------------------------------------------------------------------------
     log.timeStart("Draft_Matching", { blockCount: blocks.length });
     const missingDrafts = [];
     const readyBlocks = [];
@@ -290,6 +342,15 @@ function runPlanGeneration(filterTabName) {
       missingCount: missingDrafts.length,
     });
 
+    updateProgressState(
+      15,
+      "2/4 • Rascunhos Localizados",
+      `${readyBlocks.length} bloco(s) prontos para geração.`,
+      0,
+      0,
+      false,
+    );
+
     if (missingDrafts.length > 0) {
       log.warn(
         "Draft_Matching",
@@ -304,6 +365,14 @@ function runPlanGeneration(filterTabName) {
         ui.alert("Rascunhos Pendentes", msg, ui.ButtonSet.YES_NO) !==
         ui.Button.YES
       ) {
+        updateProgressState(
+          100,
+          "Cancelado",
+          "Execução cancelada pelo usuário.",
+          0,
+          0,
+          true,
+        );
         log.info(
           "RUN_END",
           "Cancelado pelo usuário no diálogo de rascunhos pendentes.",
@@ -313,11 +382,22 @@ function runPlanGeneration(filterTabName) {
     }
 
     if (readyBlocks.length === 0) {
+      updateProgressState(
+        100,
+        "Sem rascunhos",
+        "Nenhum rascunho encontrado para gerar planos.",
+        0,
+        0,
+        true,
+      );
       log.warn("RUN_END", "Zero blocos prontos após validação de rascunhos.");
       ui.alert("⚠️ Nenhum rascunho encontrado para gerar planos.");
       return;
     }
 
+    // ------------------------------------------------------------------------
+    // ETAPA 3: LEITURA DE EDUC. ESP., GUIA PRIORIZADO E PDFs DO DRIVE (CACHE)
+    // ------------------------------------------------------------------------
     log.timeStart("Load_EducEsp_And_Guia");
     const educEspMap = loadEducEspData(ss, log);
     const guiaSummary = getPrioritizedCurriculumText(apiKey, log);
@@ -337,7 +417,17 @@ function runPlanGeneration(filterTabName) {
       15,
     );
 
-    const preparedItems = readyBlocks.map((block) => {
+    const preparedItems = readyBlocks.map((block, idx) => {
+      const pct = 20 + (idx / readyBlocks.length) * 25;
+      updateProgressState(
+        pct,
+        `3/4 • Lendo Drive (${idx + 1}/${readyBlocks.length})`,
+        `${block.tabName} (${block.subject}) - ${block.shortDateStr}`,
+        0,
+        0,
+        false,
+      );
+
       const studentsEsp = educEspMap[block.tabName] || [];
       log.info(
         "Educ_Esp_Eval",
@@ -366,10 +456,10 @@ function runPlanGeneration(filterTabName) {
       cachedPdfKeys: Object.keys(pdfBase64Cache).length,
     });
 
-    let successCount = 0;
-    let errorCount = 0;
-
-    function processItemsInBatches(items, labelPrefix, log) {
+    // ------------------------------------------------------------------------
+    // ETAPA 4: EXECUÇÃO PARALELA EM LOTES COM RETRY PARA HTTP 429 / 503
+    // ------------------------------------------------------------------------
+    function processItemsInBatches(items, labelPrefix) {
       const retryQueue = [];
       const batchesCount = Math.ceil(items.length / CONFIG.BATCH_SIZE);
 
@@ -377,6 +467,16 @@ function runPlanGeneration(filterTabName) {
         const batch = items.slice(i, i + CONFIG.BATCH_SIZE);
         const batchNum = Math.floor(i / CONFIG.BATCH_SIZE) + 1;
         const stepName = `${labelPrefix}_B${batchNum}_of_${batchesCount}`;
+
+        const batchPct = 45 + ((i + batch.length) / items.length) * 50;
+        updateProgressState(
+          batchPct,
+          `4/4 • IA (${labelPrefix} ${batchNum}/${batchesCount})`,
+          `Processando ${batch.length} bloco(s) em paralelo...`,
+          successCount,
+          errorCount,
+          false,
+        );
 
         log.checkpoint(`${stepName}_START`, { count: batch.length });
         ss.toast(
@@ -472,7 +572,7 @@ function runPlanGeneration(filterTabName) {
       return retryQueue;
     }
 
-    let pendingRetry = processItemsInBatches(preparedItems, "Batch", log);
+    let pendingRetry = processItemsInBatches(preparedItems, "Batch");
 
     for (
       let attempt = 1;
@@ -483,9 +583,15 @@ function runPlanGeneration(filterTabName) {
       log.warn(
         "Retry_Backoff",
         `Aguardando ${backoffMs / 1000}s antes da tentativa de retry #${attempt}`,
-        {
-          retryCount: pendingRetry.length,
-        },
+        { retryCount: pendingRetry.length },
+      );
+      updateProgressState(
+        92,
+        `⏳ Retry #${attempt}/${CONFIG.RETRY_ATTEMPTS}`,
+        `Aguardando ${backoffMs / 1000}s para reenviar ${pendingRetry.length} aula(s) (HTTP 429/503)...`,
+        successCount,
+        errorCount,
+        false,
       );
       ss.toast(
         `Aguardando ${backoffMs / 1000}s para tentar novamente ${pendingRetry.length} item(ns) (HTTP 429/503)...`,
@@ -496,14 +602,10 @@ function runPlanGeneration(filterTabName) {
       Utilities.sleep(backoffMs);
 
       const itemsToRetry = pendingRetry.map((r) => r.item);
-      pendingRetry = processItemsInBatches(
-        itemsToRetry,
-        `Retry_${attempt}`,
-        log,
-      );
+      pendingRetry = processItemsInBatches(itemsToRetry, `Retry_${attempt}`);
     }
 
-    // Qualquer item que ainda falhou com 429/503 após todas as tentativas entra na contagem final de erro
+    // Contabiliza falhas definitivas após esgotar todas as tentativas de retry
     pendingRetry.forEach((r) => {
       errorCount++;
       log.error(
@@ -520,6 +622,15 @@ function runPlanGeneration(filterTabName) {
       errorCount: errorCount,
     });
 
+    updateProgressState(
+      100,
+      errorCount > 0 ? "Concluído com ressalvas" : "Concluído!",
+      `${successCount} gerado(s), ${errorCount} falha(s).`,
+      successCount,
+      errorCount,
+      true,
+    );
+
     if (errorCount > 0) {
       ui.alert(
         `⚠️ Concluído com ressalvas!\n\n` +
@@ -533,13 +644,19 @@ function runPlanGeneration(filterTabName) {
       );
     }
   } catch (err) {
+    updateProgressState(
+      100,
+      "Erro Crítico",
+      `Falha na etapa "${log.lastCheckpoint}": ${err.message}`,
+      successCount,
+      errorCount + 1,
+      true,
+    );
     log.error(
       "UNHANDLED_CRASH",
       `Crash na etapa "${log.lastCheckpoint}"`,
       err,
-      {
-        filterTabName: filterTabName || "ALL",
-      },
+      { filterTabName: filterTabName || "ALL" },
     );
     ui.alert(
       `❌ Erro crítico na etapa "${log.lastCheckpoint}": ${err.message}\n\n` +
