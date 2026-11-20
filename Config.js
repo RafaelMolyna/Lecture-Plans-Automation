@@ -7,8 +7,9 @@
 const CONFIG = {
   DEFAULT_MODEL: "gemini-2.5-flash",
   TIMEZONE: "America/Sao_Paulo",
-  CURRENT_BIMESTRE: "4", // Fallback caso a coluna Bimestre esteja vazia
-  BATCH_SIZE: 5, // Número de requisições simultâneas no fetchAll()
+  CURRENT_BIMESTRE: "4",
+  BATCH_SIZE: 3, // 3 requisições paralelas reduzem 429/503 no Free Tier
+  RETRY_ATTEMPTS: 2, // Até 2 novas tentativas apenas para itens com HTTP 429 ou 503
 
   CLASS_MAP: {
     "1º Honestidade": { tab: "1º HO", grade: 1, noTv: true },
@@ -213,4 +214,5 @@ function setupCredentialsDialog() {
 function extractDriveId(urlOrId) {
   const match = urlOrId.match(/[-\w]{25,}/);
   return match ? match[0] : urlOrId.trim();
+  s;
 }

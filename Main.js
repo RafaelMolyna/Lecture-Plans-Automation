@@ -368,119 +368,149 @@ function runPlanGeneration(filterTabName) {
 
     let successCount = 0;
     let errorCount = 0;
-    const totalBatches = Math.ceil(preparedItems.length / CONFIG.BATCH_SIZE);
 
-    for (let i = 0; i < preparedItems.length; i += CONFIG.BATCH_SIZE) {
-      const batch = preparedItems.slice(i, i + CONFIG.BATCH_SIZE);
-      const batchNum = Math.floor(i / CONFIG.BATCH_SIZE) + 1;
-      const batchLabel = `Batch_${batchNum}_of_${totalBatches}`;
+    function processItemsInBatches(items, labelPrefix, log) {
+      const retryQueue = [];
+      const batchesCount = Math.ceil(items.length / CONFIG.BATCH_SIZE);
 
-      log.checkpoint(`BATCH_${batchNum}_START`, { batchSize: batch.length });
-      ss.toast(
-        `Processando lote paralelo ${batchNum}/${totalBatches} (${batch.length} aulas)...`,
-        "🚀 Gemini API",
-        25,
-      );
+      for (let i = 0; i < items.length; i += CONFIG.BATCH_SIZE) {
+        const batch = items.slice(i, i + CONFIG.BATCH_SIZE);
+        const batchNum = Math.floor(i / CONFIG.BATCH_SIZE) + 1;
+        const stepName = `${labelPrefix}_B${batchNum}_of_${batchesCount}`;
 
-      log.timeStart(batchLabel, { batchNum: batchNum, count: batch.length });
-      const httpRequests = batch.map((item) => item.request);
-      const httpResponses = UrlFetchApp.fetchAll(httpRequests);
-      log.timeEnd(batchLabel, { batchNum: batchNum });
+        log.checkpoint(`${stepName}_START`, { count: batch.length });
+        ss.toast(
+          `${labelPrefix}: lote ${batchNum}/${batchesCount} (${batch.length} aula(s))...`,
+          "🚀 Gemini API",
+          20,
+        );
+        SpreadsheetApp.flush();
 
-      log.timeStart(`Write_Batch_${batchNum}`);
-      httpResponses.forEach((resp, idx) => {
-        const item = batch[idx];
-        const block = item.block;
-        const statusCode = resp.getResponseCode();
-        const respText = resp.getContentText();
+        log.timeStart(stepName, { batchNum: batchNum, count: batch.length });
+        const responses = UrlFetchApp.fetchAll(batch.map((it) => it.request));
+        log.timeEnd(stepName, { batchNum: batchNum });
 
-        if (statusCode === 200) {
-          const parsedPlan = parseGeminiJsonResponse(respText, block, log);
-          if (parsedPlan && parsedPlan.aula_1) {
-            const updatedCell1 = buildFormattedCellRichText(
-              block,
-              parsedPlan.aula_1,
-              item.studentsEsp,
-              log,
-            );
-            paSheet
-              .getRange(block.row1, block.colIndex)
-              .setRichTextValue(updatedCell1);
+        responses.forEach((resp, idx) => {
+          const item = batch[idx];
+          const block = item.block;
+          const code = resp.getResponseCode();
+          const body = resp.getContentText();
 
-            if (block.isDouble && block.row2) {
-              const part2Data = parsedPlan.aula_2 || parsedPlan.aula_1;
-              if (!parsedPlan.aula_2) {
-                log.warn(
-                  "Double_Split",
-                  `aula_2 ausente na resposta de ${block.tabName}; reutilizando aula_1.`,
-                );
-              }
-              const updatedCell2 = buildFormattedCellRichText(
-                block,
-                part2Data,
-                item.studentsEsp,
-                log,
-              );
+          if (code === 200) {
+            const parsed = parseGeminiJsonResponse(body, block, log);
+            if (parsed && parsed.aula_1) {
               paSheet
-                .getRange(block.row2, block.colIndex)
-                .setRichTextValue(updatedCell2);
-            }
-
-            if (
-              block.draft.wasDateBlank &&
-              block.draft.sheet &&
-              block.draft.rowNumber &&
-              block.draft.dateColIndex
-            ) {
-              block.draft.sheet
-                .getRange(block.draft.rowNumber, block.draft.dateColIndex)
-                .setValue(block.shortDateStr);
+                .getRange(block.row1, block.colIndex)
+                .setRichTextValue(
+                  buildFormattedCellRichText(
+                    block,
+                    parsed.aula_1,
+                    item.studentsEsp,
+                    log,
+                  ),
+                );
+              if (block.isDouble && block.row2) {
+                const p2 = parsed.aula_2 || parsed.aula_1;
+                paSheet
+                  .getRange(block.row2, block.colIndex)
+                  .setRichTextValue(
+                    buildFormattedCellRichText(
+                      block,
+                      p2,
+                      item.studentsEsp,
+                      log,
+                    ),
+                  );
+              }
+              if (
+                block.draft.wasDateBlank &&
+                block.draft.sheet &&
+                block.draft.rowNumber &&
+                block.draft.dateColIndex
+              ) {
+                block.draft.sheet
+                  .getRange(block.draft.rowNumber, block.draft.dateColIndex)
+                  .setValue(block.shortDateStr);
+              }
+              successCount++;
               log.info(
-                "Auto_Date",
-                `Data ${block.shortDateStr} preenchida em ${block.tabName} linha ${block.draft.rowNumber}`,
+                "Block_Success",
+                `${block.tabName} (${block.subject}) - ${block.shortDateStr}`,
+              );
+            } else {
+              errorCount++;
+              log.error(
+                "Block_Parse_Fail",
+                `JSON inválido em ${block.tabName} (${block.subject})`,
+                { preview: body.slice(0, 250) },
               );
             }
-
-            successCount++;
-            log.info(
-              "Block_Success",
-              `${block.tabName} (${block.subject}) - ${block.shortDateStr}`,
-              {
-                isDouble: block.isDouble,
-                hasPart2: Boolean(parsedPlan.aula_2),
-              },
+          } else if (code === 429 || code === 503) {
+            log.warn(
+              "Retry_Queue",
+              `HTTP ${code} em ${block.tabName} (${block.subject}); enfileirado para retry.`,
             );
+            retryQueue.push({ item: item, lastCode: code });
           } else {
             errorCount++;
             log.error(
-              "Block_Parse_Fail",
-              `JSON incompleto/inválido para ${block.tabName} (${block.subject})`,
-              {
-                date: block.shortDateStr,
-                hasAula1: Boolean(parsedPlan && parsedPlan.aula_1),
-                rawPreview: respText.slice(0, 300),
-              },
+              "Gemini_HTTP_Error",
+              `HTTP ${code} em ${block.tabName} (${block.subject})`,
+              { preview: body.slice(0, 300) },
             );
           }
-        } else {
-          errorCount++;
-          log.error(
-            "Gemini_HTTP_Error",
-            `HTTP ${statusCode} em ${block.tabName} (${block.subject})`,
-            {
-              date: block.shortDateStr,
-              model: modelName,
-              bodyPreview: respText.slice(0, 400),
-            },
-          );
-        }
-      });
-      log.timeEnd(`Write_Batch_${batchNum}`);
-      log.checkpoint(`BATCH_${batchNum}_DONE`, {
-        successSoFar: successCount,
-        errorsSoFar: errorCount,
-      });
+        });
+
+        SpreadsheetApp.flush();
+        log.checkpoint(`${stepName}_DONE`, {
+          successCount,
+          errorCount,
+          queuedForRetry: retryQueue.length,
+        });
+      }
+
+      return retryQueue;
     }
+
+    let pendingRetry = processItemsInBatches(preparedItems, "Batch", log);
+
+    for (
+      let attempt = 1;
+      attempt <= CONFIG.RETRY_ATTEMPTS && pendingRetry.length > 0;
+      attempt++
+    ) {
+      const backoffMs = attempt * 4000;
+      log.warn(
+        "Retry_Backoff",
+        `Aguardando ${backoffMs / 1000}s antes da tentativa de retry #${attempt}`,
+        {
+          retryCount: pendingRetry.length,
+        },
+      );
+      ss.toast(
+        `Aguardando ${backoffMs / 1000}s para tentar novamente ${pendingRetry.length} item(ns) (HTTP 429/503)...`,
+        "⏳ Retry",
+        10,
+      );
+      SpreadsheetApp.flush();
+      Utilities.sleep(backoffMs);
+
+      const itemsToRetry = pendingRetry.map((r) => r.item);
+      pendingRetry = processItemsInBatches(
+        itemsToRetry,
+        `Retry_${attempt}`,
+        log,
+      );
+    }
+
+    // Qualquer item que ainda falhou com 429/503 após todas as tentativas entra na contagem final de erro
+    pendingRetry.forEach((r) => {
+      errorCount++;
+      log.error(
+        "Retry_Exhausted",
+        `Falha persistente (HTTP ${r.lastCode}) após retries em ${r.item.block.tabName} (${r.item.block.subject})`,
+      );
+    });
 
     log.timeStart("Spreadsheet_Flush");
     SpreadsheetApp.flush();
